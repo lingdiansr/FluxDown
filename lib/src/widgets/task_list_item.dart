@@ -629,6 +629,7 @@ class _TaskActionButtonState extends State<TaskActionButton> {
       ),
     );
   }
+
 }
 
 // =============================================================================
@@ -733,6 +734,17 @@ void showTaskContextMenu(
         ),
       );
     case TaskStatus.completed:
+      // 已完成但正在做种的 BT 任务也可以暂停
+      if (task.isSeeding) {
+        items.add(
+          ContextMenuItem(
+            icon: LucideIcons.pause,
+            label: s.pause,
+            color: c.textPrimary,
+            action: onPause,
+          ),
+        );
+      }
       break;
   }
 

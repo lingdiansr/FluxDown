@@ -5,6 +5,7 @@
 //! 解耦,不绑定具体的 FFI/信号/传输协议。
 
 pub mod bt_downloader;
+pub mod bt_seeding;
 pub mod cdn;
 pub mod components;
 pub mod dash_downloader;
