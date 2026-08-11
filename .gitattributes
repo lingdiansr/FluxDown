@@ -1,42 +1,14 @@
-# 仓库行尾符策略:入库统一 LF(text 规范化),源码类型全平台强制 LF 检出。
-# 存量 CRLF 文件不整库重写(不做 renormalize),在各自下次被修改时自然规范化。
-* text=auto
+# 仓库行尾符策略:入库统一 LF,文本文件全平台检出 LF。
+# text=auto 保留 git 的二进制启发式检测;eol=lf 只作用于被判定为文本的文件。
+# 存量 CRLF 已随本策略一次性 renormalize(见 .git-blame-ignore-revs)。
+* text=auto eol=lf
 
-# 源码/文本类型:全平台检出 LF
-*.dart text eol=lf
-*.rs text eol=lf
-*.ts text eol=lf
-*.tsx text eol=lf
-*.js text eol=lf
-*.jsx text eol=lf
-*.mjs text eol=lf
-*.cjs text eol=lf
-*.json text eol=lf
-*.css text eol=lf
-*.html text eol=lf
-*.md text eol=lf
-*.astro text eol=lf
-*.yaml text eol=lf
-*.yml text eol=lf
-*.toml text eol=lf
-*.xml text eol=lf
-*.plist text eol=lf
-*.xcconfig text eol=lf
-*.sh text eol=lf
-*.txt text eol=lf
-*.svg text eol=lf
-*.iss text eol=lf
-*.gradle text eol=lf
-*.kts text eol=lf
-*.cmake text eol=lf
-*.c text eol=lf
-*.h text eol=lf
-*.cpp text eol=lf
-*.cc text eol=lf
-*.hpp text eol=lf
-*.m text eol=lf
-*.swift text eol=lf
-linux/*.desktop text eol=lf
+# Windows 专属文本:检出 CRLF(cmd.exe 对 LF 批处理解析不可靠)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Inno Setup 语言包:UTF-8 BOM + CRLF(Inno Setup 6 Unicode .isl 依赖 BOM)
+installer/windows/*.isl text eol=crlf
 
 # 二进制:显式声明,防 text=auto 误判
 *.png binary
