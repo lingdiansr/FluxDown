@@ -1066,6 +1066,7 @@ fn spawn_progress_reporter(context: ProgressReporterContext) -> tokio::task::Joi
                 sample_sequence,
                 active_transfers: Some(tracker.active()),
                 connected_peers: Some(connected.active()),
+                bt_peer_stats: None,
                 parallelism_limit: match concurrency_limit.load(Ordering::Relaxed) {
                     0 => None,
                     n => Some(n),

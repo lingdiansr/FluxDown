@@ -14,8 +14,48 @@ pub struct TaskSegmentDto {
     pub active: Option<bool>,
 }
 
-/// 任务按加速来源累计的已写入字节：跨运行累加，重下 / 清盘时随进度一并复位。
+/// BT peer lifecycle and connection-quality observations from one runtime
+/// sample. Lifecycle counts are point-in-time; quality counters are cumulative
+/// for the currently managed peers/torrent.
 ///
+/// New quality fields are optional so an older daemon/runtime can still decode
+/// and forward a snapshot without fabricating zero-valued measurements.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BtPeerStatsDto {
+    pub seen: u32,
+    pub queued: u32,
+    pub connecting: u32,
+    pub live: u32,
+    pub dead: u32,
+    #[serde(default)]
+    pub useful_peers: Option<u32>,
+    #[serde(default)]
+    pub live_tcp: Option<u32>,
+    #[serde(default)]
+    pub live_utp: Option<u32>,
+    #[serde(default)]
+    pub live_socks: Option<u32>,
+    #[serde(default)]
+    pub connection_attempts: Option<u32>,
+    #[serde(default)]
+    pub connection_successes: Option<u32>,
+    #[serde(default)]
+    pub connection_errors: Option<u32>,
+    #[serde(default)]
+    pub total_connecting_ms: Option<u64>,
+    #[serde(default)]
+    pub fetched_bytes: Option<u64>,
+    #[serde(default)]
+    pub downloaded_pieces: Option<u64>,
+    #[serde(default)]
+    pub total_piece_download_ms: Option<u64>,
+    #[serde(default)]
+    pub peer_steals: Option<u32>,
+}
+
+/// 任务按加速来源累计的已写入字节：跨运行累加，重下 / 清盘时随进度一并复位。
 /// 只记录源站主链路之外的路径；源站字节 = `downloaded_bytes` − 三者之和
 /// （BT / ED2K 等 P2P 协议由客户端按协议整体归入 P2P）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -45,6 +85,9 @@ pub struct TaskRuntimeDto {
     pub sample_sequence: u64,
     pub active_transfers: Option<u32>,
     pub connected_peers: Option<u32>,
+    /// BT-only peer lifecycle counts; absent for non-BT samples.
+    #[serde(default)]
+    pub bt_peer_stats: Option<BtPeerStatsDto>,
     pub parallelism_limit: Option<u32>,
     pub total_bytes: i64,
     pub segments: Vec<TaskSegmentDto>,

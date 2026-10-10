@@ -22,6 +22,7 @@ enum class BtSettingsRow(val slug: String, val tab: BtSettingsTab, val configKey
     Upnp("upnp", BtSettingsTab.General, "bt_enable_upnp"),
     PortStart("portStart", BtSettingsTab.General, "bt_port_start"),
     PortEnd("portEnd", BtSettingsTab.General, "bt_port_end"),
+    PeerLimit("peerLimit", BtSettingsTab.General, "bt_peer_limit"),
     MseMode("mseMode", BtSettingsTab.General, "bt_mse_mode"),
     CustomTrackers("customTrackers", BtSettingsTab.Tracker, "bt_custom_trackers"),
     TrackerSub("trackerSub", BtSettingsTab.Tracker, "bt_tracker_sub_enabled"),

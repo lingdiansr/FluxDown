@@ -578,6 +578,7 @@ fn clear_active_runtime(snapshot: &mut DaemonSnapshot, task_id: &str) {
     if let Some(runtime) = snapshot.task_runtime.get_mut(task_id) {
         runtime.active_transfers = Some(0);
         runtime.connected_peers = Some(0);
+        runtime.bt_peer_stats = runtime.bt_peer_stats.map(|_| Default::default());
         for segment in &mut runtime.segments {
             segment.active = Some(false);
         }

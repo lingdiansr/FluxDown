@@ -103,6 +103,26 @@ export interface TaskSegmentDto {
   downloadedBytes: number;
   active: boolean | null;
 }
+/** BT peer lifecycle counts and optional connection-quality counters. */
+export interface BtPeerStatsDto {
+  seen: number;
+  queued: number;
+  connecting: number;
+  live: number;
+  dead: number;
+  usefulPeers?: number | null;
+  liveTcp?: number | null;
+  liveUtp?: number | null;
+  liveSocks?: number | null;
+  connectionAttempts?: number | null;
+  connectionSuccesses?: number | null;
+  connectionErrors?: number | null;
+  totalConnectingMs?: number | null;
+  fetchedBytes?: number | null;
+  downloadedPieces?: number | null;
+  totalPieceDownloadMs?: number | null;
+  peerSteals?: number | null;
+}
 
 /** 任务最新传输采样；活跃传输数不是 socket 数、配置上限或分段数。 */
 export interface TaskRuntimeDto {
@@ -112,6 +132,8 @@ export interface TaskRuntimeDto {
   sampleSequence: number;
   activeTransfers: number | null;
   connectedPeers: number | null;
+  /** BT peer lifecycle counts; null/absent for non-BT samples or old daemons. */
+  btPeerStats?: BtPeerStatsDto | null;
   parallelismLimit: number | null;
   totalBytes: number;
   segments: TaskSegmentDto[];

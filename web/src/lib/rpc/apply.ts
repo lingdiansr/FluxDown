@@ -45,9 +45,30 @@ function withoutKey<V>(record: Readonly<Record<string, V>>, key: string): Record
 
 /** 读数已清零时为 true，可复用原引用。 */
 function isRuntimeCleared(runtime: TaskRuntimeDto): boolean {
+  const peers = runtime.btPeerStats
+  const peersCleared =
+    peers == null ||
+    (peers.seen === 0 &&
+      peers.queued === 0 &&
+      peers.connecting === 0 &&
+      peers.live === 0 &&
+      peers.dead === 0 &&
+      (peers.usefulPeers ?? 0) === 0 &&
+      (peers.liveTcp ?? 0) === 0 &&
+      (peers.liveUtp ?? 0) === 0 &&
+      (peers.liveSocks ?? 0) === 0 &&
+      (peers.connectionAttempts ?? 0) === 0 &&
+      (peers.connectionSuccesses ?? 0) === 0 &&
+      (peers.connectionErrors ?? 0) === 0 &&
+      (peers.totalConnectingMs ?? 0) === 0 &&
+      (peers.fetchedBytes ?? 0) === 0 &&
+      (peers.downloadedPieces ?? 0) === 0 &&
+      (peers.totalPieceDownloadMs ?? 0) === 0 &&
+      (peers.peerSteals ?? 0) === 0)
   return (
     runtime.activeTransfers === 0 &&
     runtime.connectedPeers === 0 &&
+    peersCleared &&
     runtime.segments.every((segment) => !segment.active)
   )
 }
@@ -59,6 +80,29 @@ function clearedRuntime(runtime: TaskRuntimeDto): TaskRuntimeDto {
     ...runtime,
     activeTransfers: 0,
     connectedPeers: 0,
+    btPeerStats:
+      runtime.btPeerStats == null
+        ? runtime.btPeerStats
+        : {
+            ...runtime.btPeerStats,
+            seen: 0,
+            queued: 0,
+            connecting: 0,
+            live: 0,
+            dead: 0,
+            usefulPeers: null,
+            liveTcp: null,
+            liveUtp: null,
+            liveSocks: null,
+            connectionAttempts: null,
+            connectionSuccesses: null,
+            connectionErrors: null,
+            totalConnectingMs: null,
+            fetchedBytes: null,
+            downloadedPieces: null,
+            totalPieceDownloadMs: null,
+            peerSteals: null,
+          },
     segments: runtime.segments.map((segment) => ({ ...segment, active: false })),
   }
 }

@@ -54,6 +54,27 @@ pub fn task_runtime_to_dto(
         sample_sequence: runtime.sample_sequence,
         active_transfers: runtime.active_transfers,
         connected_peers: runtime.connected_peers,
+        bt_peer_stats: runtime
+            .bt_peer_stats
+            .map(|stats| fluxdown_protocol::BtPeerStatsDto {
+                seen: stats.seen,
+                queued: stats.queued,
+                connecting: stats.connecting,
+                live: stats.live,
+                dead: stats.dead,
+                useful_peers: stats.useful_peers,
+                live_tcp: stats.live_tcp,
+                live_utp: stats.live_utp,
+                live_socks: stats.live_socks,
+                connection_attempts: stats.connection_attempts,
+                connection_successes: stats.connection_successes,
+                connection_errors: stats.connection_errors,
+                total_connecting_ms: stats.total_connecting_ms,
+                fetched_bytes: stats.fetched_bytes,
+                downloaded_pieces: stats.downloaded_pieces,
+                total_piece_download_ms: stats.total_piece_download_ms,
+                peer_steals: stats.peer_steals,
+            }),
         parallelism_limit: runtime.parallelism_limit,
         total_bytes: runtime.total_bytes,
         segments: runtime

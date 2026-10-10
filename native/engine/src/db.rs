@@ -2751,9 +2751,10 @@ impl Db {
             ("bt_enable_upnp", "true"),
             ("bt_port_start", "6881"),
             ("bt_port_end", "6891"),
+            // Per-torrent peer admission limit; 128..512, default 256.
+            ("bt_peer_limit", "256"),
             // MSE 三态逃生开关（disabled/enabled/forced），无 UI，经 config API/CLI 可设。
             ("bt_mse_mode", "enabled"),
-            ("bt_custom_trackers", ""),
             // Tracker 订阅：默认启用，订阅社区流行的两个精选列表
             // （XIU2/TrackersListCollection + ngosang/trackerslist）。
             // cache 由订阅刷新流程写入，updated_at=0 表示从未更新。

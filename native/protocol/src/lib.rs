@@ -16,8 +16,8 @@ pub mod rpc;
 pub mod settings;
 pub mod task_activity;
 pub use task_activity::{
-    TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto, TaskSegmentDto,
-    TaskSourceBytesDto,
+    BtPeerStatsDto, TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto,
+    TaskSegmentDto, TaskSourceBytesDto,
 };
 
 pub use agent::{

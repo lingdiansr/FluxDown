@@ -65,6 +65,11 @@ fn basic_section(ctx: &SectionContext, bt_enabled: bool) -> SettingsSection {
         ))
         .row(ctx.item("btListenPortEnd", None, ctx.daemon_number("bt_port_end")))
         .row(ctx.item(
+            "btPeerLimit",
+            Some("btPeerLimitDesc"),
+            ctx.daemon_number("bt_peer_limit"),
+        ))
+        .row(ctx.item(
             "btMseMode",
             Some("btMseModeDesc"),
             ctx.daemon_enum_dropdown("bt_mse_mode", "btMseMode"),

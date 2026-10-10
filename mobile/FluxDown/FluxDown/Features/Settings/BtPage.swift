@@ -74,8 +74,10 @@ struct BtPage: View {
                         .transition(.opacity)
                 }
             }
+            if BtSettingsRow.peerLimit.isVisible(in: form) {
+                ConfigNumberRow(item: BtSettingsRow.peerLimit.item, range: 128 ... 512, fallback: 256)
+            }
             if BtSettingsRow.mseMode.isVisible(in: form) { BtMseModeRow() }
-        } header: {
             Text(L("btSettingsRestartHint")).textCase(nil)
         } footer: {
             if container.isLocalHost { Text(L("btMobileFootnote")) }

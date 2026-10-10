@@ -4263,6 +4263,7 @@ impl DownloadManager {
         // 做种求值 tick 的 reconcile 中被重新平衡。
         if let Some(ref bt) = self.bt_session {
             bt.seeding_manager().set_cap(config.seed_max_active);
+            bt.set_peer_limit(config.peer_limit);
         }
         self.bt_config = config;
     }
@@ -16837,6 +16838,7 @@ mod tests {
                 sample_sequence: crate::transfer_activity::next_sample_sequence(),
                 active_transfers: Some(1),
                 connected_peers: None,
+                bt_peer_stats: None,
                 parallelism_limit: Some(8),
                 total_bytes: 100,
                 segments: vec![segment],

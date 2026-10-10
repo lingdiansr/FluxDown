@@ -218,6 +218,11 @@ pub fn bt_config_from_map(
             .get("bt_port_end")
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(6891),
+        peer_limit: cfg
+            .get("bt_peer_limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(fluxdown_engine::bt_downloader::normalize_bt_peer_limit)
+            .unwrap_or(fluxdown_engine::bt_downloader::BT_PEER_LIMIT_DEFAULT),
         custom_trackers: cfg.get("bt_custom_trackers").cloned().unwrap_or_default(),
         subscription_trackers: if subscription_enabled {
             cfg.get("bt_tracker_sub_cache").cloned().unwrap_or_default()

@@ -4,7 +4,8 @@
 //! dropped the subset and downloaded every file.
 
 use fluxdown_engine::bt_downloader::{
-    BtSelectionStrategy, build_add_torrent_options, decide_bt_selection_strategy,
+    BtSelectionStrategy, build_add_torrent_options, build_add_torrent_options_with_peer_limit,
+    decide_bt_selection_strategy,
 };
 
 // Path A: partial subset known before add → must be applied at add time.
@@ -72,7 +73,18 @@ fn build_add_options_bakes_known_subset_into_only_files() {
     let opts = build_add_torrent_options(&strategy, "stage".to_string(), 0);
 
     assert_eq!(opts.only_files, Some(vec![0, 1, 2, 3, 4, 5, 6, 7, 8]));
+    assert_eq!(opts.peer_limit, Some(256));
     assert_eq!(opts.output_folder.as_deref(), Some("stage"));
+}
+
+#[test]
+fn explicit_peer_limit_is_clamped_to_safe_bounds() {
+    let strategy = BtSelectionStrategy::All;
+    let low = build_add_torrent_options_with_peer_limit(&strategy, "stage".to_string(), 0, 127);
+    let high = build_add_torrent_options_with_peer_limit(&strategy, "stage".to_string(), 0, 513);
+
+    assert_eq!(low.peer_limit, Some(128));
+    assert_eq!(high.peer_limit, Some(512));
 }
 
 // All / PostAdd must leave only_files unset so librqbit fetches every file.

@@ -4018,6 +4018,7 @@ fn single_runtime(task_id: &str, downloaded: i64, total: i64, active: bool) -> T
         sample_sequence: crate::transfer_activity::next_sample_sequence(),
         active_transfers: Some(u32::from(active)),
         connected_peers: None,
+        bt_peer_stats: None,
         parallelism_limit: Some(1),
         total_bytes: total,
         segments: if total > 0 {

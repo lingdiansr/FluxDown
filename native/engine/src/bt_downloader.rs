@@ -300,6 +300,17 @@ const PUBLIC_TRACKERS: &[&str] = &[
     "http://tracker.bt4g.com:2095/announce",
 ];
 
+fn merged_tracker_urls(custom_trackers: &str, subscription_trackers: &str) -> HashSet<url::Url> {
+    let merged = crate::tracker_subscription::merge_dedup(
+        PUBLIC_TRACKERS
+            .iter()
+            .copied()
+            .chain(custom_trackers.lines())
+            .chain(subscription_trackers.lines()),
+    );
+    merged.iter().filter_map(|s| s.parse().ok()).collect()
+}
+
 /// Return the built-in public tracker list as a newline-separated string.
 /// Used to populate the default config value on first launch so users can
 /// see and edit the full list in Settings.
@@ -388,6 +399,17 @@ fn probe_listener_port(port: u16) -> std::io::Result<()> {
     }
 }
 
+/// Per-torrent peer admission bounds. This is deliberately separate from any
+/// session-wide connection budget in librqbit.
+pub const BT_PEER_LIMIT_MIN: usize = 128;
+pub const BT_PEER_LIMIT_MAX: usize = 512;
+pub const BT_PEER_LIMIT_DEFAULT: usize = 256;
+
+#[must_use]
+pub fn normalize_bt_peer_limit(value: usize) -> usize {
+    value.clamp(BT_PEER_LIMIT_MIN, BT_PEER_LIMIT_MAX)
+}
+
 /// User-configurable BT session settings, loaded from the DB config table.
 #[derive(Debug, Clone)]
 pub struct BtConfig {
@@ -419,6 +441,8 @@ pub struct BtConfig {
     /// Max simultaneously active seeders (0 = unlimited). Completed torrents
     /// beyond the cap wait in a FIFO seeding queue until a slot frees up.
     pub seed_max_active: usize,
+    /// Per-torrent peer admission limit for newly added torrents.
+    pub peer_limit: usize,
     /// MSE (Message Stream Encryption) policy for BT peer connections.
     /// Emergency escape hatch settable via config API/CLI; no Settings UI.
     pub mse_mode: BtMseMode,
@@ -441,6 +465,7 @@ impl Default for BtConfig {
             seed_limit_operator: crate::bt_seeding::SeedingLimitOperator::Or,
             seed_then_action: "stop".to_string(),
             seed_max_active: 0,
+            peer_limit: BT_PEER_LIMIT_DEFAULT,
             mse_mode: BtMseMode::Enabled,
         }
     }
@@ -568,6 +593,9 @@ pub struct SharedBtSession {
     /// `{hash}.torrent`).  Kept so that `clear_stale_fastresume` can remove a
     /// `.bitv` whose staging data no longer exists (BUG-BT-PHANTOM-PIECES).
     persistence_folder: PathBuf,
+    /// Per-torrent peer admission limit for future adds. Existing handles are
+    /// intentionally not rebuilt when this setting changes.
+    peer_limit: AtomicUsize,
 }
 
 impl SharedBtSession {
@@ -598,6 +626,8 @@ impl SharedBtSession {
         // Scale worker threads with CPU cores.  BT workload is mostly I/O-bound
         // so diminishing returns beyond 8 threads; capping here saves ~2 MB of
         // stack memory per thread avoided.
+        let peer_limit = normalize_bt_peer_limit(bt_config.peer_limit);
+
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -611,20 +641,11 @@ impl SharedBtSession {
             .build()
             .map_err(|e| DownloadError::Other(format!("failed to build BT runtime: {e}")))?;
 
-        // Base list: the user's tracker list from Settings, falling back to
-        // the built-in PUBLIC_TRACKERS when empty.  Subscription trackers
-        // (fetched from community-maintained lists) are appended, and the
-        // whole set is deduped by normalized URL form.
-        let base: Vec<&str> = if bt_config.custom_trackers.trim().is_empty() {
-            PUBLIC_TRACKERS.to_vec()
-        } else {
-            bt_config.custom_trackers.lines().collect()
-        };
-        let merged = crate::tracker_subscription::merge_dedup(
-            base.into_iter()
-                .chain(bt_config.subscription_trackers.lines()),
-        );
-        let trackers: HashSet<url::Url> = merged.iter().filter_map(|s| s.parse().ok()).collect();
+        // Always retain the built-in public trackers.  User and subscription
+        // trackers are additions, not an override: replacing the public set
+        // can silently reduce discovery when a stale/custom list is present.
+        let trackers =
+            merged_tracker_urls(&bt_config.custom_trackers, &bt_config.subscription_trackers);
 
         let total_tracker_count = trackers.len();
 
@@ -887,13 +908,14 @@ impl SharedBtSession {
         }
 
         log_info!(
-            "[BT] shared session created (DHT={}, UPnP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
+            "[BT] shared session created (DHT={}, UPnP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, peer_limit={}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
             enable_dht,
             enable_upnp,
             port_start,
             port_end,
             session.listen_addr(),
             bt_config.mse_mode,
+            peer_limit,
             total_tracker_count,
             speed_limit_bps,
             upload_limit_bps,
@@ -903,6 +925,8 @@ impl SharedBtSession {
         Ok(Self {
             runtime: rt,
             session,
+            peer_limit: AtomicUsize::new(peer_limit),
+
             handles: Mutex::new(HashMap::new()),
             pending_deletes: Mutex::new(HashMap::new()),
             inflight_adds: AtomicUsize::new(0),
@@ -914,6 +938,15 @@ impl SharedBtSession {
             fastresume_tainted: Mutex::new(HashSet::new()),
             persistence_folder,
         })
+    }
+
+    /// Update the admission limit used for future torrent adds.
+    ///
+    /// librqbit has no safe live setter for an existing torrent's peer
+    /// semaphore, so existing handles remain unchanged.
+    pub fn set_peer_limit(&self, value: usize) {
+        self.peer_limit
+            .store(normalize_bt_peer_limit(value), Ordering::Relaxed);
     }
 
     /// Remove the `{info_hash}.bitv` fast-resume bitfield for a torrent.
@@ -1285,11 +1318,13 @@ impl SharedBtSession {
             overwrite: true,
             output_folder: Some(output_folder),
             only_files,
+            peer_limit: Some(self.peer_limit.load(Ordering::Relaxed)),
             paused: true,
             ratelimits: task_ratelimits(upload_limit_bps),
             storage_factory: parts_factory.map(|f| f.into_boxed()),
             ..Default::default()
         };
+
         let response = self
             .session
             .add_torrent(add_input, Some(opts))
@@ -2877,22 +2912,66 @@ fn build_bt_segments(
     )
 }
 
-/// BT peers come from librqbit live statistics; virtual geometry is not concurrency.
+const USEFUL_PEER_BYTES: u64 = 1024 * 1024;
+
+/// Convert librqbit's live torrent and peer snapshots into an engine-owned
+/// sample. The aggregate snapshot is allocation-free; the per-peer snapshot is
+/// used only to count useful peers and connection counters for the current
+/// live peer set.
+fn bt_peer_stats_from_handle(handle: &BtHandle) -> Option<crate::transfer_activity::BtPeerStats> {
+    let live = handle.live()?;
+    let snapshot = live.stats_snapshot();
+    let peers = live.per_peer_stats_snapshot(Default::default());
+    let mut useful_peers = 0u32;
+    let mut connection_attempts = 0u32;
+    let mut connection_successes = 0u32;
+    let mut connection_errors = 0u32;
+    let mut total_connecting_ms = 0u64;
+
+    for peer in peers.peers.values() {
+        let counters = &peer.counters;
+        useful_peers =
+            useful_peers.saturating_add(u32::from(counters.fetched_bytes >= USEFUL_PEER_BYTES));
+        connection_attempts = connection_attempts.saturating_add(counters.connection_attempts);
+        connection_successes = connection_successes.saturating_add(counters.connections);
+        connection_errors = connection_errors.saturating_add(counters.errors);
+        total_connecting_ms = total_connecting_ms.saturating_add(counters.total_time_connecting_ms);
+    }
+
+    let peer_stats = snapshot.peer_stats;
+    Some(crate::transfer_activity::BtPeerStats {
+        seen: peer_stats.seen,
+        queued: peer_stats.queued,
+        connecting: peer_stats.connecting,
+        live: peer_stats.live,
+        dead: peer_stats.dead,
+        useful_peers: Some(useful_peers),
+        live_tcp: Some(peer_stats.live_tcp),
+        live_utp: Some(peer_stats.live_utp),
+        live_socks: Some(peer_stats.live_socks),
+        connection_attempts: Some(connection_attempts),
+        connection_successes: Some(connection_successes),
+        connection_errors: Some(connection_errors),
+        total_connecting_ms: Some(total_connecting_ms),
+        fetched_bytes: Some(snapshot.fetched_bytes),
+        downloaded_pieces: Some(snapshot.downloaded_and_checked_pieces),
+        total_piece_download_ms: Some(snapshot.total_piece_download_ms),
+        peer_steals: Some(peer_stats.steals),
+    })
+}
 fn bt_runtime(
     task_id: &str,
     total_bytes: i64,
-    connected_peers: Option<u32>,
+    bt_peer_stats: Option<crate::transfer_activity::BtPeerStats>,
 ) -> crate::transfer_activity::TaskRuntime {
     crate::transfer_activity::TaskRuntime {
         task_id: task_id.to_owned(),
         sampled_at_ms: chrono::Utc::now().timestamp_millis(),
         sample_sequence: crate::transfer_activity::next_sample_sequence(),
-        active_transfers: None,
-        connected_peers,
-        parallelism_limit: None,
+        connected_peers: bt_peer_stats.map(|stats| stats.live),
+        bt_peer_stats,
         total_bytes,
-        segments: Vec::new(),
-        source_bytes: None,
+        ..Default::default()
     }
 }
 
@@ -3407,21 +3486,37 @@ impl BtSelectionStrategy {
     }
 }
 
-/// Build the librqbit add options for a fresh torrent. Baking the known subset
-/// into `only_files` here (not via a post-add `update_only_files`) is the fix
-/// for the Initializing race (#90); the production add site must go through this.
+/// Build the librqbit add options for a fresh torrent with the default
+/// per-torrent peer limit.
 pub fn build_add_torrent_options(
     strategy: &BtSelectionStrategy,
     output_folder: String,
     upload_limit_bps: u64,
 ) -> AddTorrentOptions {
+    build_add_torrent_options_with_peer_limit(
+        strategy,
+        output_folder,
+        upload_limit_bps,
+        BT_PEER_LIMIT_DEFAULT,
+    )
+}
+
+/// Build add options with an explicit bounded per-torrent peer limit.
+pub fn build_add_torrent_options_with_peer_limit(
+    strategy: &BtSelectionStrategy,
+    output_folder: String,
+    upload_limit_bps: u64,
+    peer_limit: usize,
+) -> AddTorrentOptions {
     let mut opts = AddTorrentOptions {
         overwrite: true,
         output_folder: Some(output_folder),
         only_files: strategy.only_files_for_add(),
+        peer_limit: Some(normalize_bt_peer_limit(peer_limit)),
         ratelimits: task_ratelimits(upload_limit_bps),
         ..Default::default()
     };
+
     // NTFS 上 staging 文件走 sparse 存储：set_len 不再一次性预留全部簇，
     // 随机偏移 piece 写入没有 VDL 零填充（见 `bt_sparse` 模块文档）。
     // 其他平台 set_len 天然稀疏，保持 librqbit 默认存储。
@@ -3816,8 +3911,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 subset.len()
             );
         }
-        let add_opts =
-            build_add_torrent_options(&selection_strategy, stage_dir_str, upload_limit_bps);
+        let add_opts = build_add_torrent_options_with_peer_limit(
+            &selection_strategy,
+            stage_dir_str,
+            upload_limit_bps,
+            shared_bt.peer_limit.load(Ordering::Relaxed),
+        );
 
         log_info!(
             "[BT] task={} adding torrent to shared session (metadata resolution may take a while)...",
@@ -4673,11 +4772,6 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 total_pieces,
                 init_pieces,
             )),
-            runtime: Some(bt_runtime(
-                &task_id,
-                total_bytes,
-                stats.live.as_ref().map(|l| l.snapshot.peer_stats.live),
-            )),
             ..Default::default()
         })
         .await
@@ -5497,7 +5591,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     runtime: Some(bt_runtime(
                         &task_id,
                         final_total,
-                        stats.live.as_ref().map(|l| l.snapshot.peer_stats.live),
+                        bt_peer_stats_from_handle(&handle),
                     )),
                     upload_speed_bps: completed_upload_speed_bps,
                     bt_data_finished: false,
@@ -5571,12 +5665,16 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 .map(|l| (l.download_speed.mbps * 1024.0 * 1024.0) as i64)
                 .unwrap_or(0);
 
-            let (peers_live, peers_connecting, peers_queued, peers_seen, peers_dead) = stats
-                .live
-                .as_ref()
-                .map(|l| {
-                    let ps = &l.snapshot.peer_stats;
-                    (ps.live, ps.connecting, ps.queued, ps.seen, ps.dead)
+            let peer_stats = bt_peer_stats_from_handle(&handle);
+            let (peers_live, peers_connecting, peers_queued, peers_seen, peers_dead) = peer_stats
+                .map(|stats| {
+                    (
+                        stats.live,
+                        stats.connecting,
+                        stats.queued,
+                        stats.seen,
+                        stats.dead,
+                    )
                 })
                 .unwrap_or((0, 0, 0, 0, 0));
 
@@ -5665,11 +5763,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     error_message: String::new(),
                     file_name: String::new(),
                     segment_details: Some(seg_details),
-                    runtime: Some(bt_runtime(
-                        &task_id,
-                        total,
-                        stats.live.as_ref().map(|l| l.snapshot.peer_stats.live),
-                    )),
+                    runtime: Some(bt_runtime(&task_id, total, peer_stats)),
                     upload_speed_bps,
                     uploaded_bytes: cumulative_upload,
                     ..Default::default()
@@ -5796,6 +5890,13 @@ mod tests {
                 len: *len,
             })
             .collect()
+    }
+    #[test]
+    fn custom_trackers_keep_builtin_public_trackers() {
+        let trackers = super::merged_tracker_urls("https://custom.example/announce", "");
+
+        assert!(trackers.contains(&"https://custom.example/announce".parse().unwrap()));
+        assert!(trackers.contains(&super::PUBLIC_TRACKERS[0].parse().unwrap()));
     }
     #[test]
     fn bt_mse_mode_parses_supported_values_without_allocating() {
@@ -5993,13 +6094,13 @@ mod tests {
 
     mod selection_save_lifecycle {
         use super::super::{
-            AddTorrent, AddTorrentResponse, Arc, AtomicBool, AtomicUsize, BtFileEntry, BtHandle,
-            BtInnerParams, BtSelectionStrategy, Bytes, Db, DownloadError, Duration, HashMap,
-            HashSet, HostSelection, ListenerMode, ListenerOptions, Mutex, Ordering, Path,
-            ProgressUpdate, STATUS_DOWNLOADING, SeedingManager, SelectionOutcome, Session,
-            SessionOptions, SessionPersistenceConfig, SharedBtSession, SocketAddr, TorrentSource,
-            bt_download_inner, bt_stage_dir, build_add_torrent_options, mpsc, probe_torrent_meta,
-            stage_dir_has_real_data,
+            AddTorrent, AddTorrentResponse, Arc, AtomicBool, AtomicUsize, BT_PEER_LIMIT_DEFAULT,
+            BtFileEntry, BtHandle, BtInnerParams, BtSelectionStrategy, Bytes, Db, DownloadError,
+            Duration, HashMap, HashSet, HostSelection, ListenerMode, ListenerOptions, Mutex,
+            Ordering, Path, ProgressUpdate, STATUS_DOWNLOADING, SeedingManager, SelectionOutcome,
+            Session, SessionOptions, SessionPersistenceConfig, SharedBtSession, SocketAddr,
+            TorrentSource, bt_download_inner, bt_stage_dir, build_add_torrent_options, mpsc,
+            probe_torrent_meta, stage_dir_has_real_data,
         };
         use sqlx::Connection;
 
@@ -6107,6 +6208,7 @@ mod tests {
             Arc::new(SharedBtSession {
                 runtime,
                 session,
+                peer_limit: AtomicUsize::new(BT_PEER_LIMIT_DEFAULT),
                 handles: Mutex::new(HashMap::new()),
                 pending_deletes: Mutex::new(HashMap::new()),
                 inflight_adds: AtomicUsize::new(0),

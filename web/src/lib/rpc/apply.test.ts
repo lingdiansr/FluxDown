@@ -32,6 +32,26 @@ function runtime(taskId: string, sampleSequence: number, active = 2): TaskRuntim
     sampleSequence,
     totalBytes: 10,
     activeTransfers: active,
+    connectedPeers: active,
+    btPeerStats: {
+      seen: 8,
+      queued: 2,
+      connecting: 3,
+      live: active,
+      dead: 1,
+      usefulPeers: 2,
+      liveTcp: 1,
+      liveUtp: 1,
+      liveSocks: 0,
+      connectionAttempts: 4,
+      connectionSuccesses: 3,
+      connectionErrors: 1,
+      totalConnectingMs: 100,
+      fetchedBytes: 200,
+      downloadedPieces: 5,
+      totalPieceDownloadMs: 300,
+      peerSteals: 1,
+    },
     segments: [{ index: 0, startByte: 0, endByte: 9, downloadedBytes: 1, active: true }],
   } as unknown as TaskRuntimeDto
 }
@@ -53,6 +73,25 @@ describe('apply daemon events', () => {
 
     snap = applyDaemonEvent(snap, { type: 'taskChanged', data: task('t', 2) })
     expect(snap.taskRuntime.t?.activeTransfers).toBe(0)
+    expect(snap.taskRuntime.t?.btPeerStats).toEqual({
+      seen: 0,
+      queued: 0,
+      connecting: 0,
+      live: 0,
+      dead: 0,
+      usefulPeers: null,
+      liveTcp: null,
+      liveUtp: null,
+      liveSocks: null,
+      connectionAttempts: null,
+      connectionSuccesses: null,
+      connectionErrors: null,
+      totalConnectingMs: null,
+      fetchedBytes: null,
+      downloadedPieces: null,
+      totalPieceDownloadMs: null,
+      peerSteals: null,
+    })
     expect(snap.taskRuntime.t?.segments[0]?.active).toBe(false)
   })
 
@@ -78,7 +117,12 @@ describe('apply daemon events', () => {
 
   test('engine tasksSnapshot：剪除已消失任务；非活跃清零，活跃与已清零条目保持引用', () => {
     const active = runtime('a', 1)
-    const cleared = { ...runtime('c', 1, 0), connectedPeers: 0, segments: [] } as unknown as TaskRuntimeDto
+    const cleared = {
+      ...runtime('c', 1, 0),
+      connectedPeers: 0,
+      btPeerStats: { seen: 0, queued: 0, connecting: 0, live: 0, dead: 0 },
+      segments: [],
+    } as unknown as TaskRuntimeDto
     const base = daemon([], { a: active, b: runtime('b', 1), c: cleared, gone: runtime('gone', 1) })
     const next = applyDaemonEvent(base, {
       type: 'engine',

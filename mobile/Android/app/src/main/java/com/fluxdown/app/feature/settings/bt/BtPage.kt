@@ -66,7 +66,7 @@ private const val K_SEED_MAIN = "seed-main"
 private const val K_SEED_LIMITS = "seed-limits"
 
 private fun itemKeyOf(row: BtSettingsRow): String = when (row) {
-    BtSettingsRow.Enabled, BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd, BtSettingsRow.MseMode -> K_GENERAL
+    BtSettingsRow.Enabled, BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd, BtSettingsRow.PeerLimit, BtSettingsRow.MseMode -> K_GENERAL
     BtSettingsRow.CustomTrackers -> K_TRACKER_LIST
     BtSettingsRow.TrackerSub, BtSettingsRow.TrackerSubUrls, BtSettingsRow.TrackerSubStatus -> K_TRACKER_SUB
     BtSettingsRow.SeedEnabled, BtSettingsRow.SeedMaxActive, BtSettingsRow.AutoReseed -> K_SEED_MAIN
@@ -87,6 +87,7 @@ private fun titleOf(row: BtSettingsRow): Int = when (row) {
     BtSettingsRow.Upnp -> R.string.btEnableUpnp
     BtSettingsRow.PortStart -> R.string.btListenPortStart
     BtSettingsRow.PortEnd -> R.string.btListenPortEnd
+    BtSettingsRow.PeerLimit -> R.string.btPeerLimit
     BtSettingsRow.MseMode -> R.string.btMseMode
     BtSettingsRow.CustomTrackers -> R.string.btTrackerList
     BtSettingsRow.TrackerSub -> R.string.btTrackerSub
@@ -110,6 +111,7 @@ private fun detailOf(row: BtSettingsRow): Int? = when (row) {
     BtSettingsRow.Dht -> R.string.btEnableDhtDesc
     BtSettingsRow.Upnp -> R.string.btEnableUpnpDesc
     BtSettingsRow.PortStart -> R.string.btListenPortDesc
+    BtSettingsRow.PeerLimit -> R.string.btPeerLimitDesc
     BtSettingsRow.MseMode -> R.string.btMseModeDesc
     BtSettingsRow.CustomTrackers -> R.string.btTrackerListDesc
     BtSettingsRow.TrackerSub -> R.string.btTrackerSubDesc
@@ -268,6 +270,18 @@ private fun GeneralSection(ctx: SettingsCtx) {
                 }
             }
         }
+        if (BtSettingsRow.PeerLimit.isVisible(form)) {
+            settingNumber(
+                ctx,
+                BtSettingsRow.PeerLimit.configKey,
+                R.string.btPeerLimit,
+                R.string.btPeerLimitDesc,
+                range = 128L..512L,
+                default = 256L,
+                id = BtSettingsRow.PeerLimit.id,
+            )
+        }
+
         if (BtSettingsRow.MseMode.isVisible(form)) {
             settingChoice(ctx, BtSettingsRow.MseMode.configKey, R.string.btMseMode, R.string.btMseModeDesc, id = BtSettingsRow.MseMode.id) {
                 BtMseModeOptions(mseLabels)

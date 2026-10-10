@@ -1,7 +1,7 @@
 //! `TaskDto` 必须在 wire 上保留任务来源页与加速来源累计。
 
 use fluxdown_engine::model::{SourceBytes, TaskInfo};
-use fluxdown_engine::transfer_activity::TaskRuntime;
+use fluxdown_engine::transfer_activity::{BtPeerStats, TaskRuntime};
 
 #[test]
 fn task_dto_json_carries_referrer() -> Result<(), serde_json::Error> {
@@ -127,5 +127,83 @@ fn runtime_dto_distinguishes_no_attribution_from_zero_attribution() -> Result<()
             nic_bytes: 9,
         })
     );
+    Ok(())
+}
+
+#[test]
+fn runtime_dto_carries_bt_peer_lifecycle_and_quality_stats() -> Result<(), serde_json::Error> {
+    let dto = fluxdown_engine_protocol::task_runtime_to_dto(TaskRuntime {
+        connected_peers: Some(7),
+        bt_peer_stats: Some(BtPeerStats {
+            seen: 31,
+            queued: 4,
+            connecting: 6,
+            live: 7,
+            dead: 14,
+            useful_peers: Some(3),
+            live_tcp: Some(4),
+            live_utp: Some(2),
+            live_socks: Some(1),
+            connection_attempts: Some(11),
+            connection_successes: Some(8),
+            connection_errors: Some(3),
+            total_connecting_ms: Some(9_000),
+            fetched_bytes: Some(10_000),
+            downloaded_pieces: Some(12),
+            total_piece_download_ms: Some(13_000),
+            peer_steals: Some(2),
+        }),
+        ..TaskRuntime::default()
+    });
+
+    assert_eq!(dto.connected_peers, Some(7));
+    assert_eq!(
+        dto.bt_peer_stats,
+        Some(fluxdown_protocol::BtPeerStatsDto {
+            seen: 31,
+            queued: 4,
+            connecting: 6,
+            live: 7,
+            dead: 14,
+            useful_peers: Some(3),
+            live_tcp: Some(4),
+            live_utp: Some(2),
+            live_socks: Some(1),
+            connection_attempts: Some(11),
+            connection_successes: Some(8),
+            connection_errors: Some(3),
+            total_connecting_ms: Some(9_000),
+            fetched_bytes: Some(10_000),
+            downloaded_pieces: Some(12),
+            total_piece_download_ms: Some(13_000),
+            peer_steals: Some(2),
+        })
+    );
+    assert_eq!(
+        serde_json::to_string(&dto)?,
+        r#"{"taskId":"","sampledAtMs":0,"sampleSequence":0,"activeTransfers":null,"connectedPeers":7,"btPeerStats":{"seen":31,"queued":4,"connecting":6,"live":7,"dead":14,"usefulPeers":3,"liveTcp":4,"liveUtp":2,"liveSocks":1,"connectionAttempts":11,"connectionSuccesses":8,"connectionErrors":3,"totalConnectingMs":9000,"fetchedBytes":10000,"downloadedPieces":12,"totalPieceDownloadMs":13000,"peerSteals":2},"parallelismLimit":null,"totalBytes":0,"segments":[],"sourceBytes":null}"#
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_dto_accepts_old_wire_without_bt_peer_stats() -> Result<(), serde_json::Error> {
+    let dto: fluxdown_protocol::TaskRuntimeDto = serde_json::from_str(
+        r#"{"taskId":"t","sampledAtMs":1,"sampleSequence":2,"activeTransfers":null,"connectedPeers":null,"parallelismLimit":null,"totalBytes":0,"segments":[],"sourceBytes":null}"#,
+    )?;
+    assert_eq!(dto.bt_peer_stats, None);
+    Ok(())
+}
+
+#[test]
+fn runtime_dto_accepts_old_bt_peer_stats_without_quality_fields() -> Result<(), serde_json::Error> {
+    let dto: fluxdown_protocol::TaskRuntimeDto = serde_json::from_str(
+        r#"{"taskId":"t","sampledAtMs":1,"sampleSequence":2,"activeTransfers":null,"connectedPeers":2,"btPeerStats":{"seen":4,"queued":1,"connecting":2,"live":2,"dead":0},"parallelismLimit":null,"totalBytes":0,"segments":[],"sourceBytes":null}"#,
+    )?;
+    let stats = dto.bt_peer_stats.expect("missing BT peer stats");
+    assert_eq!(stats.seen, 4);
+    assert_eq!(stats.useful_peers, None);
+    assert_eq!(stats.connection_attempts, None);
+    assert_eq!(stats.fetched_bytes, None);
     Ok(())
 }

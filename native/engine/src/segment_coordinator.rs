@@ -1233,6 +1233,7 @@ fn sampled_http_runtime(
         sample_sequence,
         active_transfers: Some(active_transfers),
         connected_peers: None,
+        bt_peer_stats: None,
         parallelism_limit: Some(parallelism_limit),
         total_bytes,
         segments: snapshot

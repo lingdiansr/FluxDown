@@ -27,6 +27,7 @@ fn dash_runtime(task_id: &str, state: &ProgressState) -> TaskRuntime {
         sample_sequence: crate::transfer_activity::next_sample_sequence(),
         active_transfers: Some(state.tracker.active()),
         connected_peers: None,
+        bt_peer_stats: None,
         parallelism_limit: Some(1),
         total_bytes: state.total_bytes,
         segments: state

@@ -153,6 +153,11 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
         "6891",
     ),
     field(
+        "bt_peer_limit",
+        DaemonConfigKind::Integer { min: 128, max: 512 },
+        "256",
+    ),
+    field(
         "bt_mse_mode",
         DaemonConfigKind::Enum(BT_MSE_MODES),
         "enabled",
@@ -463,6 +468,16 @@ mod tests {
             normalize_daemon_config_value("bt_enable_dht", "1").as_deref(),
             Ok("true")
         );
+        assert_eq!(
+            normalize_daemon_config_value("bt_peer_limit", "128").as_deref(),
+            Ok("128")
+        );
+        assert_eq!(
+            normalize_daemon_config_value("bt_peer_limit", "512").as_deref(),
+            Ok("512")
+        );
+        assert!(normalize_daemon_config_value("bt_peer_limit", "127").is_err());
+        assert!(normalize_daemon_config_value("bt_peer_limit", "513").is_err());
         assert!(normalize_daemon_config_value("cdn_max_nodes", "9").is_err());
         assert!(normalize_daemon_config_value("bt_tracker_sub_cache", "x").is_err());
         assert!(normalize_daemon_config_value("nope", "x").is_err());

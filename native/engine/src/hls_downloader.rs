@@ -57,6 +57,7 @@ fn hls_runtime(task_id: &str, tracker: &TransferTracker, limit: u32) -> TaskRunt
         sample_sequence: crate::transfer_activity::next_sample_sequence(),
         active_transfers: Some(tracker.active()),
         connected_peers: None,
+        bt_peer_stats: None,
         parallelism_limit: Some(limit),
         total_bytes: 0,
         segments: Vec::new(),

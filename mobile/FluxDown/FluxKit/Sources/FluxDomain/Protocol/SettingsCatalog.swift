@@ -105,6 +105,7 @@ public enum SettingsCatalog {
         daemon("bt_enable_upnp", .bool, "true"),
         daemon("bt_port_start", .integer(min: 1, max: 65_535), "6881"),
         daemon("bt_port_end", .integer(min: 1, max: 65_535), "6891"),
+        daemon("bt_peer_limit", .integer(min: 128, max: 512), "256"),
         daemon("bt_mse_mode", .choice(btMseModes), "enabled"),
         daemon("bt_custom_trackers", .text, ""),
         daemon("bt_tracker_sub_enabled", .bool, "true"),

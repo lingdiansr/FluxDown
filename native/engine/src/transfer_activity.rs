@@ -22,6 +22,37 @@ pub struct TaskSegment {
     pub active: Option<bool>,
 }
 
+/// BT peer lifecycle and connection-quality observations from one runtime
+/// sample. Lifecycle counts are point-in-time; quality counters are cumulative
+/// for the currently managed peers/torrent.
+///
+/// `None` on a quality field means the backend did not expose that observation
+/// for this sample. It is not equivalent to a measured zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BtPeerStats {
+    pub seen: u32,
+    pub queued: u32,
+    pub connecting: u32,
+    pub live: u32,
+    pub dead: u32,
+    /// Live peers that have fetched at least 1 MiB for this torrent.
+    pub useful_peers: Option<u32>,
+    /// Current live transport split.
+    pub live_tcp: Option<u32>,
+    pub live_utp: Option<u32>,
+    pub live_socks: Option<u32>,
+    /// Cumulative connection counters from the backend peer records.
+    pub connection_attempts: Option<u32>,
+    pub connection_successes: Option<u32>,
+    pub connection_errors: Option<u32>,
+    pub total_connecting_ms: Option<u64>,
+    /// Cumulative torrent fetch/piece-quality counters.
+    pub fetched_bytes: Option<u64>,
+    pub downloaded_pieces: Option<u64>,
+    pub total_piece_download_ms: Option<u64>,
+    pub peer_steals: Option<u32>,
+}
+
 /// A sampled task runtime, independent from the daemon wire DTO.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TaskRuntime {
@@ -30,6 +61,8 @@ pub struct TaskRuntime {
     pub sample_sequence: u64,
     pub active_transfers: Option<u32>,
     pub connected_peers: Option<u32>,
+    /// BT-only peer lifecycle counts; `None` means this sample is not BT.
+    pub bt_peer_stats: Option<BtPeerStats>,
     pub parallelism_limit: Option<u32>,
     pub total_bytes: i64,
     pub segments: Vec<TaskSegment>,

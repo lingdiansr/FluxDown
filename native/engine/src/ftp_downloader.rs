@@ -48,6 +48,7 @@ fn ftp_runtime(
         sample_sequence,
         active_transfers: Some(tracker.active()),
         connected_peers: None,
+        bt_peer_stats: None,
         parallelism_limit: Some(limit),
         total_bytes,
         segments: segments
