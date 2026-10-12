@@ -11,7 +11,7 @@
 
 ## 已确认事实
 
-- pinned checkout：`zerx-lab/rqbit` rev `d9e79c939f223679612cd0b06bd00ed49bd2eff8`。
+- pinned checkout：`zerx-lab/rqbit` rev `00374a6d772d4123f079f5adf6a1fe013e363381`（2026-10-12 随上游 #825 更新）。
 - `librqbit::LiveTorrent::per_peer_stats_snapshot()` 已能返回逐 peer 记录。
 - pinned rqbit 的 `PeerCounters` 已有：
   - `fetched_bytes`
