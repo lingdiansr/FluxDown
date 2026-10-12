@@ -400,7 +400,7 @@ CPU/RSS/FD/disk IO
 DHT lookup and tracker announce result
 ```
 
-只有当来源、握手、贡献字节和资源指标都能在同一窗口对齐，才允许讨论自动 peer 调整。第一版仍保持固定 `bt_peer_limit`，不加入控制器。
+只有当来源、握手、贡献字节和资源指标都能在同一窗口对齐，才允许讨论自动 peer 调整。第一版不加入控制器：`bt_peer_limit`（128..512，默认 256）由用户显式选择，并在 daemon 重建共享会话时同步到 session 缺省；A/B 上限 512 即该范围上界。
 
 ## 代码边界
 
