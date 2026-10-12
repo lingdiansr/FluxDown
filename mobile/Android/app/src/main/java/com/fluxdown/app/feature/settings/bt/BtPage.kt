@@ -66,7 +66,7 @@ private const val K_SEED_MAIN = "seed-main"
 private const val K_SEED_LIMITS = "seed-limits"
 
 private fun itemKeyOf(row: BtSettingsRow): String = when (row) {
-    BtSettingsRow.Enabled, BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd, BtSettingsRow.PeerLimit, BtSettingsRow.MseMode -> K_GENERAL
+    BtSettingsRow.Enabled, BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.Utp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd, BtSettingsRow.PeerLimit, BtSettingsRow.MseMode -> K_GENERAL
     BtSettingsRow.CustomTrackers -> K_TRACKER_LIST
     BtSettingsRow.TrackerSub, BtSettingsRow.TrackerSubUrls, BtSettingsRow.TrackerSubStatus -> K_TRACKER_SUB
     BtSettingsRow.SeedEnabled, BtSettingsRow.SeedMaxActive, BtSettingsRow.AutoReseed -> K_SEED_MAIN
@@ -85,6 +85,7 @@ private fun titleOf(row: BtSettingsRow): Int = when (row) {
     BtSettingsRow.Enabled -> R.string.btEnabled
     BtSettingsRow.Dht -> R.string.btEnableDht
     BtSettingsRow.Upnp -> R.string.btEnableUpnp
+    BtSettingsRow.Utp -> R.string.btEnableUtp
     BtSettingsRow.PortStart -> R.string.btListenPortStart
     BtSettingsRow.PortEnd -> R.string.btListenPortEnd
     BtSettingsRow.PeerLimit -> R.string.btPeerLimit
@@ -110,6 +111,7 @@ private fun detailOf(row: BtSettingsRow): Int? = when (row) {
     BtSettingsRow.Enabled -> R.string.btEnabledDesc
     BtSettingsRow.Dht -> R.string.btEnableDhtDesc
     BtSettingsRow.Upnp -> R.string.btEnableUpnpDesc
+    BtSettingsRow.Utp -> R.string.btEnableUtpDesc
     BtSettingsRow.PortStart -> R.string.btListenPortDesc
     BtSettingsRow.PeerLimit -> R.string.btPeerLimitDesc
     BtSettingsRow.MseMode -> R.string.btMseModeDesc
@@ -241,6 +243,9 @@ private fun GeneralSection(ctx: SettingsCtx) {
         }
         if (BtSettingsRow.Upnp.isVisible(form)) {
             settingSwitch(ctx, BtSettingsRow.Upnp.configKey, R.string.btEnableUpnp, R.string.btEnableUpnpDesc, id = BtSettingsRow.Upnp.id)
+        }
+        if (BtSettingsRow.Utp.isVisible(form)) {
+            settingSwitch(ctx, BtSettingsRow.Utp.configKey, R.string.btEnableUtp, R.string.btEnableUtpDesc, id = BtSettingsRow.Utp.id)
         }
         if (BtSettingsRow.PortStart.isVisible(form)) {
             settingNumber(

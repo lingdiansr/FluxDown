@@ -183,6 +183,11 @@ pub struct DaemonCreateTaskParams {
     /// 浏览器扩展对一次性 URL 已拿到 Content-Length 时透传，引擎据此创建任务。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint_file_size: Option<i64>,
+    /// 参照文件名：调用方已知的原始文件名（浏览器捕获时浏览器定下的名字）。仅当
+    /// `request.fileName` 是缺扩展名的显式名（用户改名）时，引擎借它的扩展名补全，
+    /// 主名不变；缺省 / 空串 = 无参照。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_hint: Option<String>,
 }
 
 /// 批量任务操作参数（`daemon.task.pauseMany` / `daemon.task.resumeMany`）。
@@ -1776,7 +1781,7 @@ pub enum WsServerMsg {
     },
     /// 入站配对请求待本机用户核验（本机作为响应方收到远端 hello+配对码后，
     /// 等待管理员核对 SAS 并调用管理面 `POST /api/v1/link/pair/approve`）。
-    /// 字段名与桌面端 rinf `LinkEvent{kind:"incomingPairing"}` 信号保持一致。
+    /// 字段名保持历史 `incomingPairing` 事件兼容。
     LinkIncomingPairing {
         session_id: String,
         sas: String,

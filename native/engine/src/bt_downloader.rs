@@ -15,7 +15,7 @@
 //! - Speed limit is applied at the `Session` level via `ratelimits` and
 //!   updated in real-time when the user changes the global speed setting.
 //! - `add_torrent` blocks while resolving magnet metadata from DHT/peers, so
-//!   we report "preparing" status to Dart while we wait.
+//!   we report "preparing" status to the host while we wait.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -399,8 +399,19 @@ fn probe_listener_port(port: u16) -> std::io::Result<()> {
     }
 }
 
-/// Per-torrent peer admission bounds. This is deliberately separate from any
-/// session-wide connection budget in librqbit.
+/// Per-torrent peer admission bounds (librqbit `SessionOptions::peer_limit` /
+/// `AddTorrentOptions::peer_limit`, upstream default 128).
+///
+/// librqbit 用同一个信号量同时计「连接中」与「已连接」：出站连接从拨号起就
+/// 占许可，直到连接超时 / 握手失败才释放；许可耗尽时入站连接被直接丢弃。
+/// 公网 swarm 里大部分 peer 不可达，实测（#825，6.9 GB 公开种子）128 的上限
+/// 被约 120 个连接中的尝试占满，只剩 5–10 个可用 peer，队列里上千个 peer
+/// 永远轮不到；连接中的数量另由 `connect_rate`（30/s）× 超时约束在 ~200–300。
+/// 512 让信号量不再成为瓶颈：稳态 1.1 → 12.6 MB/s（交错重复多轮的均值），
+/// RSS 增加约 15 MB。
+///
+/// `BT_PEER_LIMIT_DEFAULT` 同时用作 session 缺省与新建 torrent 的缺省；用户可在
+/// 设置里选 128..512（设置项 `bt_peer_limit`，见 `.omp/knowledge/engine.md`）。
 pub const BT_PEER_LIMIT_MIN: usize = 128;
 pub const BT_PEER_LIMIT_MAX: usize = 512;
 pub const BT_PEER_LIMIT_DEFAULT: usize = 256;
@@ -416,6 +427,10 @@ pub struct BtConfig {
     pub enabled: bool,
     pub enable_dht: bool,
     pub enable_upnp: bool,
+    /// Listen and connect over uTP in addition to TCP (`ListenerMode::TcpAndUtp`).
+    /// Many peers (uTorrent / qBittorrent / BitComet) are reachable over uTP
+    /// only from behind NAT; #825 measured ~2× live peers with it on.
+    pub enable_utp: bool,
     pub port_start: u16,
     pub port_end: u16,
     /// User-supplied extra tracker URLs (newline-separated).
@@ -454,6 +469,7 @@ impl Default for BtConfig {
             enabled: true,
             enable_dht: true,
             enable_upnp: true,
+            enable_utp: true,
             port_start: 6881,
             port_end: 6891,
             custom_trackers: String::new(),
@@ -671,6 +687,7 @@ impl SharedBtSession {
 
         let enable_dht = bt_config.enable_dht;
         let enable_upnp = bt_config.enable_upnp;
+        let enable_utp = bt_config.enable_utp;
 
         let save_dir = default_save_dir.to_owned();
         let save_dir_for_cleanup = save_dir.clone();
@@ -707,7 +724,11 @@ impl SharedBtSession {
             // then IPv4-only, preserving the existing port-range contract on
             // occupied ports and hosts without usable IPv6.
             listen: Some(ListenerOptions {
-                mode: ListenerMode::TcpOnly,
+                mode: if enable_utp {
+                    ListenerMode::TcpAndUtp
+                } else {
+                    ListenerMode::TcpOnly
+                },
                 listen_addr: if ipv4_only {
                     SocketAddr::from(([0, 0, 0, 0], port))
                 } else {
@@ -765,6 +786,8 @@ impl SharedBtSession {
                 max_delay: Duration::from_secs(600),
                 total_delay: Some(Duration::from_secs(1800)),
             }),
+            // 连接中与已连接共用此上限，见 `BT_PEER_LIMIT_DEFAULT`。
+            peer_limit: Some(peer_limit),
             ..Default::default()
         };
         let start_session = |dht: bool| -> anyhow::Result<Arc<Session>> {
@@ -908,9 +931,10 @@ impl SharedBtSession {
         }
 
         log_info!(
-            "[BT] shared session created (DHT={}, UPnP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, peer_limit={}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
+            "[BT] shared session created (DHT={}, UPnP={}, uTP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, peer_limit={}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
             enable_dht,
             enable_upnp,
+            enable_utp,
             port_start,
             port_end,
             session.listen_addr(),
@@ -1769,7 +1793,7 @@ struct BtInnerParams {
 }
 
 // ---------------------------------------------------------------------------
-// Task status codes — must match Dart TaskStatus enum values.
+// Task status codes — must match the `native/protocol` task status codes (.omp/knowledge/engine.md).
 // ---------------------------------------------------------------------------
 const STATUS_DOWNLOADING: i32 = 1;
 #[allow(dead_code)]
@@ -2993,7 +3017,7 @@ fn build_multi_file_segments(
         // torrent's `file_offsets`, an unselected file's `offset` can exceed
         // `total_bytes`.  Such a file would yield `start > end` and a negative
         // `downloaded_bytes`, producing an illegal SegmentProgressInfo for
-        // Dart.  Skip any file whose start lies beyond the (subset) total.
+        // the host.  Skip any file whose start lies beyond the (subset) total.
         if start >= total_bytes {
             continue;
         }
@@ -3060,7 +3084,7 @@ fn build_piece_scatter_segments(
                 (i as i64 + 1) * chunk - 1
             };
             // 防御:钳制后正常不会发生,但若 chunk 仍致 end < start 则跳过,
-            // 决不向 Dart 发反向区间。(BUG-BT-TINY-TORRENT-SEGMENT)
+            // 决不向宿主发反向区间。(BUG-BT-TINY-TORRENT-SEGMENT)
             if end < start {
                 continue;
             }
@@ -3116,7 +3140,7 @@ fn build_piece_scatter_segments(
             (i as i64 + 1) * chunk - 1
         };
         // 防御:钳制后正常不会发生,但若 chunk 仍致 end < start 则跳过,
-        // 决不向 Dart 发反向区间。(BUG-BT-TINY-TORRENT-SEGMENT)
+        // 决不向宿主发反向区间。(BUG-BT-TINY-TORRENT-SEGMENT)
         if end < start {
             continue;
         }
@@ -4274,7 +4298,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     );
 
     // -----------------------------------------------------------------------
-    // Phase 3.5: Send file list to Dart and wait for user file selection.
+    // Phase 3.5: Send file list to the host and wait for user file selection.
     // -----------------------------------------------------------------------
 
     // Count files for potential fallback (select-all).
@@ -4299,7 +4323,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     //    No dialog shown.
     //
     // B) No pre-selection (first-time magnet link with no prior choice):
-    //    Send BtFilesInfo to Dart so the file-selection dialog is shown.
+    //    Send BtFilesInfo to the host so the file-selection dialog is shown.
     //    Persist the confirmed selection to DB so future resumes use Path A.
     //    Poll until the user confirms or the task is cancelled.
     // -----------------------------------------------------------------------
@@ -4342,7 +4366,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         );
         pre_selected_indices
     } else {
-        // Path B — no pre-selection: build file list and send to Dart.
+        // Path B — no pre-selection: build file list and send to the host.
         // Filter out BEP-47 padding files — they are an implementation detail
         // and must not be shown to the user.  We keep the true meta index
         // (idx from enumerate) so that the indices forwarded to
@@ -4427,7 +4451,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         );
 
         // `timeout: None` 保留现状"无限等待"语义——由 HostSelection 的具体
-        // 实现(桌面 GUI 场景为 `RinfHostSelection`)决定是否在内部包一个
+        // 实现(各宿主 daemon 内的 HostSelection 实现)决定是否在内部包一个
         // 较长但有限的超时,engine 侧不臆断产品行为。
         let outcome = selector.select_bt_files(&task_id, &bt_files, None).await;
         match &outcome {
@@ -4512,7 +4536,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         );
     }
 
-    // [-1] is the sentinel sent by Dart when the user explicitly cancels the
+    // [-1] is the sentinel sent by the client when the user explicitly cancels the
     // file selection dialog.  Pause the task (status=2) so the user can
     // resume it later and pick files again, rather than leaving it in an
     // ambiguous state or marking it as error.
@@ -4530,7 +4554,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // Drop the unconfirmed handle before declaring the task paused.
         shared_bt.delete_task(&task_id, false).await?;
         db.update_task_status(&task_id, STATUS_PAUSED, "").await?;
-        // Notify Dart so the UI immediately shows "Paused".
+        // Notify the host so the UI immediately shows "Paused".
         if progress_tx
             .send(ProgressUpdate {
                 task_id: task_id.clone(),
@@ -4749,7 +4773,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     db.update_task_status(&task_id, STATUS_DOWNLOADING, "")
         .await?;
 
-    // Notify Dart of the transition to "downloading" with resolved info
+    // Notify the host of the transition to "downloading" with resolved info
     let init_progress = stats.progress_bytes as i64;
     let init_pieces = stats
         .live

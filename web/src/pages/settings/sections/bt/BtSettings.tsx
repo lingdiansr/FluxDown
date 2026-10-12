@@ -24,6 +24,7 @@ function BasicTab({ btEnabled }: { btEnabled: boolean }) {
         <>
           <DaemonSwitchRow configKey="bt_enable_dht" titleKey="btEnableDht" descKey="btEnableDhtDesc" />
           <DaemonSwitchRow configKey="bt_enable_upnp" titleKey="btEnableUpnp" descKey="btEnableUpnpDesc" />
+          <DaemonSwitchRow configKey="bt_enable_utp" titleKey="btEnableUtp" descKey="btEnableUtpDesc" />
           <DaemonNumberRow configKey="bt_port_start" titleKey="btListenPortStart" descKey="btListenPortDesc" />
           <DaemonNumberRow configKey="bt_port_end" titleKey="btListenPortEnd" />
           <DaemonNumberRow configKey="bt_peer_limit" titleKey="btPeerLimit" descKey="btPeerLimitDesc" />

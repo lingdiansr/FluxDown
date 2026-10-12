@@ -850,7 +850,7 @@ download = 120 KiB/s
 
 ### 9.2 当前最可能的根因
 
-#### P0：rqbit 当前每个 torrent 实际受 128 个 peer 连接上限约束
+#### P0（历史分析，已修复）：rqbit 每个 torrent 曾受 128 个 peer 连接上限约束
 
 `native/engine/src/bt_downloader.rs` 的 `AddTorrentOptions` 没有设置 `peer_limit`。当前使用的 rqbit revision 在 `crates/librqbit/src/torrent_state/live/mod.rs` 中对缺省值使用：
 
@@ -859,6 +859,11 @@ peer_limit.unwrap_or(128)
 ```
 
 因此当前任务的 `live=128` 与实现默认值完全吻合。`queued` 不断上升且 `connecting` 接近零，进一步支持“连接槽位已满”的判断。
+
+> **后续修正（2026-10-12）**：本 P0 已在代码中解决——`AddTorrentOptions.peer_limit` 现由
+> `bt_peer_limit`（128..512，默认 256）显式下发，`SessionOptions.peer_limit` 也取同一配置值；
+> 上游 #825 的实测（128 → 512：稳态 1.1 → 12.6 MB/s）与本节判断一致。下文 §10.2 记录的是
+> 当时第一阶段的范围。
 
 这不等于提高连接数一定会提高速度；128 个连接可能包含慢 peer 或被 choke 的 peer。但这是当前最直接、最可验证的限制，应先做 `128/256/512` 的同种子 A/B。
 
@@ -991,7 +996,7 @@ Clash TUN 或透明代理开启
 5. 只有在提高连接上限并恢复 DHT 后仍明显低于基准，才继续定位 piece 调度或 storage。
 # 十、Pinned `librqbit` 参数总表与第一阶段调优决策
 
-本章以 FluxDown 根 `Cargo.toml` 的 `[patch.crates-io]` 为版本边界：`zerx-lab/rqbit` revision `d9e79c939f223679612cd0b06bd00ed49bd2eff8`，本机 checkout 为 `/home/wks/.cargo/git/checkouts/rqbit-d896eb2b048eb41a/d9e79c9`。上游 `ikatson/rqbit` 只用于 API 语义对照；上游默认值不覆盖 pinned fork 的运行结论。`peer_limit` 是每 torrent 上限，不是 session 全局连接上限。
+本章以 FluxDown 根 `Cargo.toml` 的 `[patch.crates-io]` 为版本边界：`zerx-lab/rqbit` revision `00374a6d772d4123f079f5adf6a1fe013e363381`（2026-10-12 随上游 #825 更新，此前为 `d9e79c939f223679612cd0b06bd00ed49bd2eff8`）。上游 `ikatson/rqbit` 只用于 API 语义对照；上游默认值不覆盖 pinned fork 的运行结论。`peer_limit` 是每 torrent 上限，也是 `SessionOptions` 的会话缺省，但不是 session 全局连接上限。
 
 ## 10.1 版本、参数作用域与生效规则
 
@@ -1014,8 +1019,8 @@ Clash TUN 或透明代理开启
 |`initial_peers`|pinned `AddTorrentOptions`|torrent discovery|peer endpoints；task value / optional / task value|task request only|add-time|加速 metadata；错误地址增加连接失败|设置/任务输入；不由控制器猜测|
 |task upload limit|`task_ratelimits`; `AddTorrentOptions.ratelimits`|torrent|B/s；task value / optional / task value|tasks DB|add-time|保证单任务上限；live handle 没有安全统一 setter|设置；已有任务不重加|
 |global download/upload limit|`SessionOptions.ratelimits`; manager setters|session|B/s；DB value / library 0 / DB value|DB + daemon config|立即|全局带宽上限；自动策略不得突破|设置；已有热更新路径|
-|`peer_limit` / `bt_peer_limit`|pinned `AddTorrentOptions.peer_limit`; `BtConfig.peer_limit`|torrent|peers；128..512，默认 256 / pinned fork default 128 / FluxDown 256|DB + daemon/GPUI/Web/mobile catalog|下次 add；已有 torrent 不删除重加|增大候选并发；CPU/FD/连接/NAT压力；观测 `seen/queued/connecting/live/dead`|设置；无可靠 live setter，保守范围|
-|session global connection limit|pinned `Session.peer_limit` / `LimitsConfig`相关 session API|session|connections；fork session field / upstream API semantics / 未覆盖|无 FluxDown UI|session init|影响所有 torrent；不能与 per-torrent `peer_limit` 混淆|固定内部；当前没有统一安全配置契约|
+|`peer_limit` / `bt_peer_limit`|`AddTorrentOptions.peer_limit` + `SessionOptions.peer_limit`; `BtConfig.peer_limit`|torrent + session default|peers；128..512，默认 256 / pinned fork default 128 / FluxDown 256|DB + daemon/GPUI/Web/mobile catalog|下次 add；已有 torrent 不删除重加|增大候选并发；CPU/FD/连接/NAT压力；观测 `seen/queued/connecting/live/dead`|设置；无可靠 live setter，保守范围|
+|session global connection limit|`Session.peer_limit`（= `SessionOptions.peer_limit`，本 fork 与 per-torrent 同源）|session|connections；FluxDown 用 `bt_peer_limit`，上游 API 语义/session 缺省|同一 `bt_peer_limit`|session 重建|session 内新建 torrent 的缺省上限；已存在 handle 不变|设置；与 per-torrent 值一致|
 |`concurrent_init_limit`|`SessionOptions.concurrent_init_limit`|session init|count；3 / library default / 3|无|session 重建|抑制 metadata/tracker storm；过低延迟批量启动|固定内部；初始化期字段|
 |runtime worker threads|`available_parallelism().clamp(2, 8)` in `SharedBtSession::new`|runtime|threads；2..8 / library host-dependent / FluxDown clamp|无|session重建|按 CPU 保守扩展；过大增加栈/调度成本|安全自动；已有边界|
 |blocking pool|`BT_MAX_BLOCKING_THREADS`|runtime|threads；64 / Tokio default differs / 64|无|session重建|保护校验/storage；运行时扩张会放大 IO 峰值|固定内部；缺少压力控制指标|
@@ -1045,19 +1050,25 @@ Clash TUN 或透明代理开启
 
 `bt_peer_limit` 是 daemon 配置键，整数范围 **128..512**，默认 **256**。它只写入新建 torrent 和应用重挂载做种的 `AddTorrentOptions.peer_limit`；现有 torrent 不通过 pause/delete/re-add 伪造 live 调整。session 重建也不宣称会改变已存在 handle 的 peer admission。配置 patch 成功只表示配置已保存；“下次新建任务生效”是对外契约。
 
+> 2026-10-12 合并上游 #825 后，**session 级 `SessionOptions.peer_limit` 也取同一配置值**（不再固定 512），
+> 使新建 torrent 未显式给 `peer_limit` 时的缺省与设置一致。已存在 handle 仍不重建。
+
 第一阶段不提供 `auto` 值。原因：当前已能观察 `seen/queued/connecting/live/dead`，但没有稳定的握手成功率、握手延迟、有效数据 peer、FD/CPU/磁盘压力统一链路，也没有 pinned fork 的安全 live semaphore setter。未来自动策略必须先补齐这些指标，并使用 128..512、步长 64、5 分钟窗口、冷却与 hysteresis；不能用 pause/delete/re-add 调参。
 
 ### 10.3 第一阶段允许自动处理与固定项
 
 允许自动处理：CPU worker 在 2..8 内选择；端口只在用户范围内探测；tracker URL 规范化/去重和内置+订阅合并；DHT persistence 损坏时清理并保留完整错误链后重试，再在无法启动时关闭 DHT继续下载；shared session 复用/空闲释放/失效重建；全局 limiter 热更新；做种 slot reconcile；fast-resume 校验。
 
-保持固定：DHT bootstrap 与内部 timer、TCP/UDP/uTP listener policy、connect/read-write/handshake timeout、connect rate、peer backoff、request window 128、`concurrent_init_limit=3`、入站 handshake 上限 256、blocking pool 64、piece scheduler/locks、storage layout、静态 tracker 成员、MSE 默认策略。共同原因是初始化期字段、无可靠 live setter、缺少观测，或调整会造成连接风暴、tracker 限流、协议兼容性下降、CPU/FD/磁盘失控。
+保持固定：DHT bootstrap 与内部 timer、TCP listener 与 IPv4 fallback policy、connect/read-write/handshake timeout、connect rate、peer backoff、request window 128、`concurrent_init_limit=3`、入站 handshake 上限 256、blocking pool 64、piece scheduler/locks、storage layout、静态 tracker 成员、MSE 默认策略。共同原因是初始化期字段、无可靠 live setter、缺少观测，或调整会造成连接风暴、tracker 限流、协议兼容性下降、CPU/FD/磁盘失控。
+
+> uTP listener 已不再是固定项：2026-10-12 合并上游后 `bt_enable_utp`（默认开）在
+> `TcpAndUtp` / `TcpOnly` 间切换，见 §10.6.1 与本文件相关说明。
 
 ### 10.4 版本边界与验证基线
 
 |检查|结论|
 |---|---|
-|FluxDown pin|`Cargo.toml` patch 与 checkout 都是 `d9e79c939f223679612cd0b06bd00ed49bd2eff8`|
+|FluxDown pin|`Cargo.toml` patch 与 checkout 都是 `00374a6d772d4123f079f5adf6a1fe013e363381`（2026-10-12 起）|
 |pinned 事实源|`crates/librqbit/src/session.rs`、`torrent_state/live/mod.rs`、`peer_connection`、DHT/limits/storage 模块|
 |上游对照|`ikatson/rqbit` README、公开 `AddTorrentOptions`/`ManagedTorrent`/`TorrentHandle` 语义；不把上游默认值写成 FluxDown 当前值|
 |代码验证|`cargo check -p fluxdown_engine --lib`、`cargo check -p fluxdown_protocol --lib`、daemon/protocol contract tests、Web settings tests|
@@ -1108,12 +1119,12 @@ Clash TUN 或透明代理开启
 |---|---|---|---|---|
 |1|`speed_limit_bytes`|`SessionOptions.ratelimits.download_bps`；`0` = 不限|会直接给整个 BT session 限速；HTTP 的分段数不影响 BT 下载|先确认实际 config 值；任何非零值都比调 peer 更优先排除|
 |1|`upload_limit_bytes` + task/queue upload limit|全局上传 limiter 与 torrent 上传 limiter 叠加|上传过低可能减少对端愿意提供的服务；过高会挤占 100M 上行、ACK/NAT/路由器资源|保持用户上限；不要用自动策略突破|
-|2|`bt_peer_limit`|每 torrent semaphore，当前 256；范围 128..512|只限制同时占用连接资源的 peer，不保证存在更多可用 peer|256 已能达到约 54–70 Mbps；没有 `live/queued` 证据前不提高|
+|2|`bt_peer_limit`|每 torrent semaphore + session 缺省，当前 256；范围 128..512|只限制同时占用连接资源的 peer，不保证存在更多可用 peer；#825 实测 128→512 在公网 swarm 里提升显著（1.1→12.6 MB/s）|先看 `live/queued` 证据再决定提高；提高后留意 CPU/FD/RSS|
 |2|DHT / tracker 发现|DHT 开启；显式 4 个 bootstrap；内置、用户、订阅 tracker 合并|决定候选 peer 数和首个有效 peer 时间；发现失败时提高 peer 上限没有收益|当前比 peer limit 更值得补观测|
 |3|`connect_rate=30`|每秒最多 30 个出站连接尝试|影响冷启动和坏 peer 替换速度，不直接限制已稳定传输吞吐|固定；缺少连接失败率/握手延迟前不调|
 |3|connect/handshake/read-write timeout|10s/10s/20s|坏 peer 占用连接槽的时长与慢 peer 保留时间之间的折中|固定；过短可能误杀高延迟 peer|
 |3|MSE `enabled`|先尝试 MSE；对明文 peer 失败后重新建立明文连接|部分 peer 会产生额外一次握手，影响建连阶段；不应影响稳定传输|只作为诊断对照，不默认关闭协议保护|
-|3|listener `TcpOnly` / IPv4 fallback|当前监听优先双栈 TCP，失败后 IPv4；不启用 uTP listener|网络环境依赖；TCP peer 可用时不构成固定吞吐上限，UDP/DHT 可达性仍独立|记录 IPv4/IPv6/UDP 环境，不盲目切换协议|
+|3|listener TCP / uTP（`bt_enable_utp`，默认开）/ IPv4 fallback|监听为 `TcpAndUtp`（关则 `TcpOnly`），优先双栈再 IPv4|开 uTP 能连上更多 NAT 后 peer（#825 实测稳态再翻倍），代价是 UDP 收发的系统态 CPU 更高|用户设置；改动经重建共享会话生效|
 |4|worker threads / blocking pool|BT runtime `2..8` worker，blocking pool `64`|影响 metadata、校验和 storage 调度；对单个 100M 顺序下载通常不是首要上限|已有安全边界，保持固定|
 |4|staging / filesystem storage|每任务 staging；默认 filesystem storage；完成期再搬移|磁盘写入、校验和搬移可能成为上限；下载中不应反复搬移最终文件|需记录磁盘写入等待和空间，不先改存储结构|
 
