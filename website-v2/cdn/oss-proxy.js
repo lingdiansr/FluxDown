@@ -8,10 +8,14 @@
  * - 回源 URL 用固定过期时间签名（V1 query 签名）：同一对象的回源 URL 恒定，
  *   CF 缓存键稳定；签名 URL 只在 CF 与 OSS 之间出现，不下发给客户端。
  * - 发布资产按版本目录不可变，边缘缓存 30 天；Range 由 CF 缓存层切片。
+ * - `.apk` / `.ipa` 在桶内追加 `.bin` 存储（OSS 默认域名禁止分发它们），对外仍是原名，
+ *   响应覆盖 Content-Type / Content-Disposition，见 src/lib/oss-storage.ts。
  *
  * 部署：cd website-v2/cdn && bunx wrangler deploy（见同目录 wrangler.toml），密钥
  * OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET 用 `bunx wrangler secret put` 注入。
  */
+
+import { ossStorageKey, renamedDownloadHeaders } from "../src/lib/oss-storage";
 
 // 2100-01-01T00:00:00Z：回源签名恒定，保证缓存键稳定。
 const SIGN_EXPIRES = 4102444800;
@@ -70,7 +74,7 @@ export default {
     // 只限制响应头等待，不能在大文件开始传输 15s 后中断其响应体。
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-      const origin = await presign(env, key);
+      const origin = await presign(env, ossStorageKey(key));
       const headers = new Headers();
       for (const name of ["range", "if-range"]) {
         const value = request.headers.get(name);
@@ -104,6 +108,11 @@ export default {
     for (const name of PASS_HEADERS) {
       const value = upstream.headers.get(name);
       if (value !== null) out.set(name, value);
+    }
+    const renamed = renamedDownloadHeaders(key);
+    if (renamed) {
+      out.set("content-type", renamed.contentType);
+      out.set("content-disposition", renamed.contentDisposition);
     }
     out.set("cache-control", `public, max-age=${BROWSER_TTL}, immutable`);
     const cacheStatus = upstream.headers.get("cf-cache-status");

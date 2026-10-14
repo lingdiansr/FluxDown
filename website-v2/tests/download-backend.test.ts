@@ -213,6 +213,29 @@ describe("CDN Worker download consumer", () => {
     });
   });
 
+  test("APK is fetched from its .bin storage key but served under the original name and type", async () => {
+    const origins: string[] = [];
+    await withOrigin((async (input) => {
+      origins.push(String(input));
+      return new Response("apk", { status: 200, headers: {
+        "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="App.apk.bin"',
+      } });
+    }) as typeof fetch, async () => {
+      const response = await worker.fetch(request("v1.2.3/app/App-arm64.apk"), env);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("apk");
+      expect(response.headers.get("content-type")).toBe("application/vnd.android.package-archive");
+      expect(response.headers.get("content-disposition")).toBe(
+        `attachment; filename="App-arm64.apk"; filename*=UTF-8''App-arm64.apk`,
+      );
+      const zip = await worker.fetch(request(), env);
+      expect(zip.headers.get("content-type")).toBe("application/octet-stream");
+    });
+    expect(new URL(origins[0]).pathname).toBe("/releases/v1.2.3/app/App-arm64.apk.bin");
+    expect(new URL(origins[1]).pathname).toBe("/releases/v1.2.3/app/App%20ARM.zip");
+  });
+
   for (const status of [301, 403, 404, 429, 500, 502]) {
     test(`HTTP ${status} cancels OSS body and redirects exact GitHub asset without caching`, async () => {
       let cancelled = false;

@@ -34,6 +34,9 @@ use crate::selection::HostSelection;
 use crate::speed_limiter::SpeedLimiter;
 use crate::transfer_activity::TaskRuntime;
 
+#[cfg(test)]
+mod import_tests;
+
 /// 文件已存在时的处理策略（config `file_exists_behavior`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileExistsBehavior {
@@ -1737,6 +1740,8 @@ async fn complete_skipped_task(params: &DownloadParams, size: i64) {
                 .send(ProgressUpdate {
                     task_id: params.task_id.clone(),
                     downloaded_bytes: size,
+                    // Adopting a local file transfers no body bytes.
+                    download_baseline: Some(size),
                     total_bytes: size,
                     status: 3,
                     error_message: String::new(),
@@ -2580,6 +2585,8 @@ pub struct DownloadManager {
     /// FIFO queue of tasks waiting for a free slot (HTTP/FTP only — BT tasks
     /// bypass the queue entirely).
     pending_queue: VecDeque<QueuedTask>,
+    /// 高频创建/完成只标脏；宿主节拍合并全量位置快照。
+    queue_positions_dirty: bool,
     /// Global speed limiter shared with all HTTP/FTP download tasks.
     speed_limiter: SpeedLimiter,
     /// 全局 BT 上传限速（B/s，0 = 不限）。会话已存在时热同步到
@@ -2829,6 +2836,7 @@ impl DownloadManager {
             done_rx: Some(done_rx),
             max_concurrent,
             pending_queue: VecDeque::new(),
+            queue_positions_dirty: false,
             speed_limiter: limiter,
             upload_limit_bps,
             bt_session: None,
@@ -4975,8 +4983,9 @@ impl DownloadManager {
         }
     }
 
-    /// 广播当前 pending_queue 中所有任务的队列位置（每次队列变化后调用）
-    fn broadcast_queue_positions(&self) {
+    /// 立即发布完整队列位置；用户批量操作不等待合并节拍。
+    fn broadcast_queue_positions(&mut self) {
+        self.queue_positions_dirty = false;
         let positions: Vec<QueuePosition> = self
             .pending_queue
             .iter()
@@ -4988,6 +4997,13 @@ impl DownloadManager {
             .collect();
         self.sink
             .emit(EngineEvent::QueuePositionsChanged(positions));
+    }
+
+    /// 宿主每 250ms 调用；只有排队顺序变化时才构造和发送位置快照。
+    pub fn flush_queue_positions(&mut self) {
+        if self.queue_positions_dirty {
+            self.broadcast_queue_positions();
+        }
     }
 
     /// Load all named queues from the database into the in-memory cache.
@@ -5251,25 +5267,17 @@ impl DownloadManager {
         // BT 被禁用：排队中的 BT 项不得启动（启动即会因会话拒绝而落成失败），
         // 先整体摘出并落回暂停，与 auto_resume_on_start 的「跳过」语义一致。
         self.park_pending_bt_tasks().await;
-        // Drain into a Vec up-front so every removal is O(1) via iteration
-        // instead of O(n) per `VecDeque::remove(i)`.  Total cost: O(n).
-        let pending: Vec<_> = self.pending_queue.drain(..).collect();
-        let mut kept = VecDeque::with_capacity(pending.len());
-        let mut global_full = false;
-
-        for queued in pending {
-            // Once global capacity is exhausted, keep all remaining items
-            // without further checks (matches the original early-break).
-            if global_full {
-                kept.push_back(queued);
-                continue;
-            }
-            // Global concurrency ceiling reached — keep this and the rest.
-            if !self.has_capacity() {
-                kept.push_back(queued);
-                global_full = true;
-                continue;
-            }
+        if self.pending_queue.is_empty() || !self.has_capacity() {
+            return;
+        }
+        let initial_len = self.pending_queue.len();
+        // 普通 FIFO 只弹出实际能启动的项，满额后保留原缓冲区；不为每个
+        // 完成任务搬运整条等待队列。仅遇到队列级限额时暂存被跳过的项。
+        let mut skipped = VecDeque::new();
+        while self.has_capacity() {
+            let Some(queued) = self.pending_queue.pop_front() else {
+                break;
+            };
             // Edge case: task was resumed/cancelled while queued — drop it.
             if self.active_tasks.contains_key(&queued.task_id) {
                 continue;
@@ -5277,7 +5285,7 @@ impl DownloadManager {
             // Queue-level concurrency check: keep (don't start) if the
             // target queue is full; it may be drained on a future call.
             if !self.has_queue_capacity(&queued.queue_id) {
-                kept.push_back(queued);
+                skipped.push_back(queued);
                 continue;
             }
             // Start the task.
@@ -5288,9 +5296,17 @@ impl DownloadManager {
             }
         }
 
-        self.pending_queue = kept;
-        // 队列变化后广播最新位置
-        self.broadcast_queue_positions();
+        if !skipped.is_empty() {
+            skipped.append(&mut self.pending_queue);
+            self.pending_queue = skipped;
+        }
+        if self.pending_queue.len() != initial_len {
+            if self.pending_queue.is_empty() {
+                self.broadcast_queue_positions();
+            } else {
+                self.queue_positions_dirty = true;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -5649,6 +5665,8 @@ impl DownloadManager {
                 self.auto_failover_attempts.remove(task_id);
                 // 来源标记：插件 onDone 可能移动/改写文件，须在通知前打上。后台执行，
                 // 不阻塞 actor；BT 多文件产物是目录，由模块递归展开。
+                // 开启「使用服务器文件时间」时标记不得刷掉服务器时间（Windows NTFS
+                // 写 ADS 会改主文件修改时间）；BT / eD2k 没有服务器时间，不付回写成本。
                 if !adopted && let Some(target) = task_target_path(&task.save_dir, &task.file_name)
                 {
                     let host_url = if task.origin_url.is_empty() {
@@ -5656,10 +5674,14 @@ impl DownloadManager {
                     } else {
                         task.origin_url.clone()
                     };
+                    let keep_mtime = self.use_server_time
+                        && !is_bt_url(&task.url)
+                        && !crate::ed2k::link::is_ed2k_url(&task.url);
                     crate::mark_of_the_web::spawn_mark_downloaded(
                         target,
                         host_url,
                         task.referrer.clone(),
+                        keep_mtime,
                     );
                 }
             }
@@ -6033,6 +6055,8 @@ impl DownloadManager {
             }
         }
 
+        let order_db = self.db.clone();
+        let order = order_db.lock_event_order().await;
         let mut tasks = match self.db.load_all_tasks().await {
             Ok(t) => t,
             Err(error) => {
@@ -6356,6 +6380,7 @@ impl DownloadManager {
             .collect();
 
         self.sink.emit(EngineEvent::TasksSnapshot(tasks));
+        drop(order);
 
         // Send persisted segment data for each task so the UI can display
         // download distribution immediately after app restart.
@@ -6436,6 +6461,9 @@ impl DownloadManager {
     /// 对比 [`Self::load_and_send_all_tasks`]：不做启动矫正、不逐任务重发分段
     /// 数据——N 任务只产生一条 [`EngineEvent::TasksSnapshot`]。
     pub async fn send_tasks_snapshot(&self) {
+        // 读库与发出必须在同一次持门内完成，否则读库后才完成的任务会被这份
+        // 旧快照回退成「下载中」，见 `Db::lock_event_order`。
+        let _order = self.db.lock_event_order().await;
         match self.db.load_all_tasks().await {
             Ok(tasks) => self.sink.emit(EngineEvent::TasksSnapshot(tasks)),
             Err(e) => log_info!("[manager] send_tasks_snapshot error: {}", e),
@@ -6845,7 +6873,7 @@ impl DownloadManager {
         let resolver_plugin_id = self.plugin_match_resolver(&url).await;
         let has_resolver = !resolver_plugin_id.is_empty();
         let is_bt = is_magnet(&url) || !torrent_file_bytes.is_empty();
-        let persisted: Result<(), downloader::DownloadError> = async {
+        let persisted: Result<TaskInfo, downloader::DownloadError> = async {
             if db_url != url && (url.starts_with("http://") || url.starts_with("https://")) {
                 self.db.set_task_origin_url(&task_id, &url).await?;
             }
@@ -6898,61 +6926,45 @@ impl DownloadManager {
                     self.db.save_bt_selected_files(&task_id, &[], true).await?;
                 }
             }
-            Ok(())
+            self.db.load_task_by_id(&task_id).await?.ok_or_else(|| {
+                downloader::DownloadError::Other("new task disappeared before publication".into())
+            })
         }
         .await;
-        if let Err(error) = persisted {
-            crate::logger::report_error(
-                "download-manager",
-                "persist new task configuration",
-                &error,
-            );
-            if let Err(rollback_error) = self.db.delete_task(&task_id).await {
+        let task = match persisted {
+            Ok(task) => task,
+            Err(error) => {
                 crate::logger::report_error(
                     "download-manager",
-                    "roll back new task",
-                    &rollback_error,
+                    "persist new task configuration",
+                    &error,
                 );
-                if let Err(status_error) = self
-                    .db
-                    .update_task_status(&task_id, 4, &format!("task creation failed: {error}"))
-                    .await
-                {
+                if let Err(rollback_error) = self.db.delete_task(&task_id).await {
                     crate::logger::report_error(
                         "download-manager",
-                        "persist failed task creation",
-                        &status_error,
+                        "roll back new task",
+                        &rollback_error,
                     );
+                    if let Err(status_error) = self
+                        .db
+                        .update_task_status(&task_id, 4, &format!("task creation failed: {error}"))
+                        .await
+                    {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "persist failed task creation",
+                            &status_error,
+                        );
+                    }
                 }
+                return None;
             }
-            return None;
-        }
+        };
 
-        // 批量建组/裂变期间抑制逐任务广播，尾部统一 TasksSnapshot 覆盖。
+        // 尚未 spawn/probe，完整事实必定先于所有进度帧；不用完成后再读库补发，
+        // 也就不会把已完成任务退回 pending。建组/裂变仍在尾部统一快照。
         if !self.suppress_bulk_broadcasts {
-            self.sink.emit(EngineEvent::TaskProgress {
-                task_id: task_id.clone(),
-                status: initial_status,
-                downloaded_bytes: 0,
-                total_bytes: 0,
-                speed: 0,
-                file_name: file_name.clone(),
-                save_dir: save_dir.clone(),
-                url: db_url.clone(),
-                error_message: String::new(),
-                upload_speed_bps: 0,
-                uploaded_bytes: 0,
-                seeding_status: 0,
-                seeding_message: String::new(),
-                seeding_time_secs: 0,
-            });
-            // 归属定向广播：TaskProgress 不携带 queue_id，客户端以「归属待定」
-            // 哨兵入列，会被队列筛选视图隐藏；此事件让新任务归属即刻收敛，
-            // 不依赖尾随 AllTasks 快照的到达时序。
-            self.sink.emit(EngineEvent::TaskQueueChanged {
-                task_id: task_id.clone(),
-                queue_id: queue_id.clone(),
-            });
+            self.sink.emit(EngineEvent::TaskChanged(Box::new(task)));
         }
 
         // Webhook：task.created（落库成功后，早于任何早退分支；`url` 用真实
@@ -7072,6 +7084,7 @@ impl DownloadManager {
             // If do_start_task failed early (e.g. BT session init), the slot
             // was freed — drain the queue so pending tasks can proceed.
             self.drain_queue().await;
+            self.sync_queue_occupancy();
         } else {
             log_info!(
                 "[manager] queuing task {} (active={}, max={}, queue={})",
@@ -7085,24 +7098,28 @@ impl DownloadManager {
             let probe_url = queued.url.clone();
             let probe_name = queued.file_name.clone();
             let queued_hint = queued.hint_file_size;
-            let probe_spec = downloader::RequestSpec::from_captured(
-                queued.method.as_deref(),
-                queued.cookies.clone(),
-                queued.referrer.clone(),
-                queued.extra_headers.clone(),
-                queued.body.clone(),
-            );
-            let (probe_client, probe_proxy, _) = self.task_http_context(
-                &queued.url,
-                &queued.proxy_url,
-                &queued.user_agent,
-                &queued.queue_id,
-                queued.ignore_tls_errors,
-            );
+            let probe_context = (!has_resolver && queued_hint == 0).then(|| {
+                let spec = downloader::RequestSpec::from_captured(
+                    queued.method.as_deref(),
+                    queued.cookies.clone(),
+                    queued.referrer.clone(),
+                    queued.extra_headers.clone(),
+                    queued.body.clone(),
+                );
+                let (client, proxy, _) = self.task_http_context(
+                    &queued.url,
+                    &queued.proxy_url,
+                    &queued.user_agent,
+                    &queued.queue_id,
+                    queued.ignore_tls_errors,
+                );
+                (spec, client, proxy)
+            });
+            // 新增只会使此队列变为占用，不必重扫全部待启动项。
+            self.occupied_queues.insert(queued.queue_id.clone());
             self.pending_queue.push_back(queued);
-            // 广播最新队列位置（批量建组/裂变期间抑制，尾部统一广播一次）
             if !self.suppress_bulk_broadcasts {
-                self.broadcast_queue_positions();
+                self.queue_positions_dirty = true;
             }
             // 带 resolver 的任务跳过 probe（探测原始页面 URL 无意义）；hint 任务
             // （浏览器扩展给了大小）不发 HEAD——一次性签名 URL 会被任何请求消耗，
@@ -7110,7 +7127,7 @@ impl DownloadManager {
             if !has_resolver && queued_hint != 0 {
                 self.fill_provisional_name(&probe_tid, &probe_url, &probe_name)
                     .await;
-            } else if !has_resolver {
+            } else if let Some((probe_spec, probe_client, probe_proxy)) = probe_context {
                 self.spawn_meta_probe(
                     probe_tid,
                     probe_url,
@@ -7121,8 +7138,6 @@ impl DownloadManager {
                 );
             }
         }
-        // 队列重新有活儿了——登记占用，下次清空时才会触发 `queue.drained`。
-        self.sync_queue_occupancy();
     }
 
     /// 任务有效 UA 的解析优先级：任务 > 队列 > 全局。任务 client 与多 CDN
@@ -8419,6 +8434,7 @@ impl DownloadManager {
                 task_id,
                 e
             );
+            return;
         }
         if let Err(e) = self.db.update_task_total_bytes(task_id, 0).await {
             log_info!(
@@ -8447,6 +8463,24 @@ impl DownloadManager {
         self.auto_failover_pending.remove(task_id);
         self.auto_failover_attempts.remove(task_id);
         self.retry_unschedule(task_id);
+
+        // Route the explicit reset through the same FIFO as transfer progress.
+        // A plain snapshot cannot distinguish this from an old DB checkpoint.
+        if self
+            .progress_tx
+            .send(ProgressUpdate {
+                task_id: task_id.to_owned(),
+                downloaded_bytes: 0,
+                download_baseline: Some(0),
+                status: 0,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        {
+            tracing::debug!("restart progress receiver closed");
+            return;
+        }
 
         // 5. 重新起飞，并下发全量快照——TaskProgress 字段不全，进度归零必须
         //    靠全量快照才能让 UI 看到。
@@ -8668,8 +8702,7 @@ impl DownloadManager {
                     seeding_time_secs: t.seeding_time_secs,
                 });
                 self.pending_queue.push_back(QueuedTask::for_resume(t));
-                // 入队后立即广播最新队列位置(与 create_task 一致),否则要等后续
-                // drain_queue 才广播,期间 UI 显示过时的排队位置。
+                // 单任务恢复立即发布位置；连续创建走宿主节拍合并。
                 self.broadcast_queue_positions();
             }
         }
@@ -11210,8 +11243,10 @@ impl DownloadManager {
         }
         // 位置事件更新待排任务的 queuePosition；全量任务快照是 queue_order
         // 已归零的权威来源，TaskQueueChanged 本身只包含归属 ID。
-        // 待排任务已迁回主队列，立即按主队列容量重新调度（drain 自带位置广播）。
+        // 队列迁移属于显式操作，位置必须在任务/队列快照之前同步收敛。
+        self.queue_positions_dirty = true;
         self.drain_queue().await;
+        self.flush_queue_positions();
         self.send_tasks_snapshot().await;
         log_info!("[manager] deleted queue: {}", queue_id);
         self.send_all_queues().await;
@@ -12335,6 +12370,8 @@ async fn emit_seeding_progress(
     seeding_status: i32,
     seeding_message: &str,
 ) {
+    // 读库 + 发出同样要与在途整表快照互斥，见 `Db::lock_event_order`。
+    let _order = db.lock_event_order().await;
     match db.load_task_by_id(task_id).await {
         Ok(Some(t)) => {
             sink.emit(EngineEvent::TaskProgress {
@@ -12379,6 +12416,9 @@ pub async fn progress_reporter(
 
     while let Some(update) = rx.recv().await {
         let now = std::time::Instant::now();
+        let previous_downloaded_bytes = update
+            .download_baseline
+            .and_then(|_| states.get(&update.task_id).map(|state| state.latest_bytes));
 
         // Latch file_name: once we get a non-empty name, remember it.
         let state = states.entry(update.task_id.clone()).or_insert_with(|| {
@@ -12596,7 +12636,7 @@ pub async fn progress_reporter(
         // Always send if this update carries a newly resolved file_name.
         let has_new_name = !update.file_name.is_empty();
 
-        if should_send || has_new_name {
+        if should_send || has_new_name || update.download_baseline.is_some() {
             // Terminal states (completed / error / paused) should report zero
             // speed so the UI doesn't show a stale EMA value. Active seeders keep
             // their upload speed so the list/detail panels remain accurate.
@@ -12604,22 +12644,40 @@ pub async fn progress_reporter(
             if report_speed > 0 {
                 state.sent_nonzero_speed = true;
             }
-            sink.emit(EngineEvent::TaskProgress {
-                task_id: update.task_id.clone(),
-                status: update.status,
-                downloaded_bytes: update.downloaded_bytes,
-                total_bytes: update.total_bytes,
-                speed: report_speed,
-                file_name: resolved_name,
-                save_dir: String::new(),
-                url: String::new(),
-                error_message: update.error_message.clone(),
-                upload_speed_bps: if is_terminal { 0 } else { state.upload_bps },
-                uploaded_bytes: cumulative_uploaded,
-                seeding_status: update.seeding_status,
-                seeding_message: update.seeding_message.clone(),
-                seeding_time_secs: update.seeding_time_secs,
-            });
+            {
+                // Terminal and authoritative baseline frames must follow any
+                // snapshot whose DB read preceded this transfer boundary.
+                let _order = if (update.status != 1 && update.status != 5)
+                    || update.download_baseline.is_some()
+                {
+                    Some(db.lock_event_order().await)
+                } else {
+                    None
+                };
+                if let Some(downloaded_bytes) = update.download_baseline {
+                    sink.emit(EngineEvent::TaskTransferBaseline {
+                        task_id: update.task_id.clone(),
+                        downloaded_bytes,
+                        previous_downloaded_bytes,
+                    });
+                }
+                sink.emit(EngineEvent::TaskProgress {
+                    task_id: update.task_id.clone(),
+                    status: update.status,
+                    downloaded_bytes: update.downloaded_bytes,
+                    total_bytes: update.total_bytes,
+                    speed: report_speed,
+                    file_name: resolved_name,
+                    save_dir: String::new(),
+                    url: String::new(),
+                    error_message: update.error_message.clone(),
+                    upload_speed_bps: if is_terminal { 0 } else { state.upload_bps },
+                    uploaded_bytes: cumulative_uploaded,
+                    seeding_status: update.seeding_status,
+                    seeding_message: update.seeding_message.clone(),
+                    seeding_time_secs: update.seeding_time_secs,
+                });
+            }
             if let Some(mut runtime) = state.cached_runtime.clone() {
                 if is_terminal {
                     runtime.sampled_at_ms = chrono::Utc::now().timestamp_millis();
@@ -15751,12 +15809,9 @@ mod tests {
         }
     }
 
-    /// 建任务事件契约：`create_task` 在 `TaskProgress` 之后立即定向广播
-    /// `TaskQueueChanged`。`TaskProgress` 不携带 queue_id，客户端以「归属
-    /// 待定」哨兵入列并被队列筛选视图隐藏；归属事件必须先于任何耗时操作
-    /// （probe/启动）送达，新任务才能即刻出现在筛选后的列表里。
+    /// 新任务第一条事实携带完整持久化字段，队列筛选不再等待全表补帧。
     #[tokio::test]
-    async fn create_task_emits_queue_attribution_after_progress() {
+    async fn create_task_emits_complete_fact_before_progress() {
         let db = Db::connect("sqlite::memory:")
             .await
             .expect("connect mem db");
@@ -15795,30 +15850,30 @@ mod tests {
                 url: "http://example.com/file.bin".to_string(),
                 save_dir: "/tmp".to_string(),
                 file_name: "file.bin".to_string(),
+                hint_file_size: 1,
                 ..Default::default()
             })
             .await
             .expect("create task");
 
         let events = sink.events();
-        let progress_idx = events
-            .iter()
-            .position(|e| matches!(e, EngineEvent::TaskProgress { task_id, .. } if *task_id == id))
-            .expect("create_task 必须广播 TaskProgress");
-        let queue_idx = events
-            .iter()
-            .position(|e| {
-                matches!(
-                    e,
-                    EngineEvent::TaskQueueChanged { task_id, queue_id }
-                        if *task_id == id && *queue_id == MAIN_QUEUE_ID
-                )
-            })
-            .expect("create_task 必须定向广播 TaskQueueChanged(main)");
-        assert!(
-            progress_idx < queue_idx,
-            "归属事件必须紧随 TaskProgress 之后（先入列再收敛归属）"
+        let EngineEvent::TaskChanged(task) = events.first().expect("created event") else {
+            panic!("first creation event must be the complete task fact");
+        };
+        assert_eq!(task.task_id, id);
+        assert_eq!(task.queue_id, MAIN_QUEUE_ID);
+        assert_eq!(
+            task.as_ref(),
+            &mgr.db
+                .load_task_by_id(&id)
+                .await
+                .expect("read task")
+                .expect("task exists")
         );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            EngineEvent::TasksSnapshot(_) | EngineEvent::TaskQueueChanged { .. }
+        )));
     }
 
     /// dedup_same_url 开启时，活跃任务的重复 URL 直接返回既有任务 id，不建
@@ -16850,6 +16905,226 @@ mod tests {
             bt_finished_count, 1,
             "second bt_data_finished=true mark on the same task must not refire"
         );
+    }
+
+    fn progress_statuses(sink: &RecordingSink) -> Vec<i32> {
+        sink.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskProgress { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn transfer_baselines_bypass_throttling_and_precede_matching_progress() {
+        let (tx, rx) = mpsc::channel(8);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        for baseline in [8_000_000, 0, 64 * 1024] {
+            tx.send(ProgressUpdate {
+                task_id: "reset".into(),
+                status: 1,
+                downloaded_bytes: baseline,
+                download_baseline: Some(baseline),
+                ..Default::default()
+            })
+            .await
+            .expect("enqueue authoritative baseline");
+        }
+        drop(tx);
+        progress_reporter(rx, db, sink.clone()).await;
+        let relevant: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskTransferBaseline {
+                    downloaded_bytes, ..
+                } => Some((true, downloaded_bytes)),
+                EngineEvent::TaskProgress {
+                    downloaded_bytes, ..
+                } => Some((false, downloaded_bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relevant,
+            [
+                (true, 8_000_000),
+                (false, 8_000_000),
+                (true, 0),
+                (false, 0),
+                (true, 64 * 1024),
+                (false, 64 * 1024),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn next_transfer_baseline_carries_the_previous_raw_window_end() {
+        const MIB: i64 = 1024 * 1024;
+        let (tx, rx) = mpsc::channel(8);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        for (downloaded_bytes, baseline) in [
+            (MIB, true),
+            (17 * MIB, false),
+            (17 * MIB, true),
+            (33 * MIB, false),
+            (33 * MIB, true),
+        ] {
+            tx.send(ProgressUpdate {
+                task_id: "range-windows".into(),
+                status: 1,
+                downloaded_bytes,
+                download_baseline: baseline.then_some(downloaded_bytes),
+                ..Default::default()
+            })
+            .await
+            .expect("enqueue range boundary");
+        }
+        drop(tx);
+        progress_reporter(rx, db, sink.clone()).await;
+        let baselines: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskTransferBaseline {
+                    downloaded_bytes,
+                    previous_downloaded_bytes,
+                    ..
+                } => Some((downloaded_bytes, previous_downloaded_bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            baselines,
+            [
+                (MIB, None),
+                (17 * MIB, Some(17 * MIB)),
+                (33 * MIB, Some(33 * MIB)),
+            ]
+        );
+    }
+
+    /// 在途整表快照期间，终态进度帧必须等快照发出后再发：读库早于落库的旧快照
+    /// 不得排在该任务完成帧之后，否则已完成的行会被回退成「下载中」。
+    #[tokio::test]
+    async fn terminal_progress_waits_for_in_flight_snapshot() {
+        let (tx, rx) = mpsc::channel(8);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let handle = tokio::spawn(progress_reporter(rx, db.clone(), sink.clone()));
+
+        let in_flight_snapshot = db.lock_event_order().await;
+        tx.send(ProgressUpdate {
+            task_id: "late".to_owned(),
+            status: 3,
+            downloaded_bytes: 10,
+            total_bytes: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("send terminal update");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            progress_statuses(&sink).is_empty(),
+            "terminal frame must not overtake an in-flight snapshot"
+        );
+
+        drop(in_flight_snapshot);
+        drop(tx);
+        handle
+            .await
+            .expect("reporter task must finish once channel closes");
+        assert_eq!(progress_statuses(&sink), [3]);
+    }
+
+    /// 活跃态进度帧不取顺序门：快照持门期间下载进度不得被阻塞。
+    #[tokio::test]
+    async fn active_progress_does_not_wait_for_snapshot() {
+        let (tx, rx) = mpsc::channel(8);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let handle = tokio::spawn(progress_reporter(rx, db.clone(), sink.clone()));
+
+        let in_flight_snapshot = db.lock_event_order().await;
+        tx.send(ProgressUpdate {
+            task_id: "live".to_owned(),
+            status: 1,
+            downloaded_bytes: 5,
+            total_bytes: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("send active update");
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("active frame must not wait for the snapshot gate")
+            .expect("reporter task must finish once channel closes");
+        assert_eq!(progress_statuses(&sink), [1]);
+        drop(in_flight_snapshot);
+    }
+
+    /// 整表快照「读库 + 发出」必须在持门期间进行，与终态帧互斥。
+    #[tokio::test]
+    async fn tasks_snapshot_holds_event_order_gate() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let manager = sched_manager_with_sink(&db, 1, sink.clone());
+
+        let terminal_frame = db.lock_event_order().await;
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            manager.send_tasks_snapshot(),
+        )
+        .await;
+        assert!(blocked.is_err(), "snapshot must wait for the gate holder");
+        assert!(sink.events().is_empty());
+
+        drop(terminal_frame);
+        manager.send_tasks_snapshot().await;
+        assert!(
+            sink.events()
+                .iter()
+                .any(|event| matches!(event, EngineEvent::TasksSnapshot(_)))
+        );
+    }
+
+    /// 做种状态帧在 actor 之外先落库、再读库发出，同样不得抢在在途整表快照之前。
+    #[tokio::test]
+    async fn seeding_progress_waits_for_in_flight_snapshot() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        insert_task_at_status(&db, "seed", "/tmp", "seed.bin", 3).await;
+        let sink: Arc<RecordingSink> = Arc::new(RecordingSink::new());
+        let dyn_sink: Arc<dyn EventSink> = sink.clone();
+
+        let in_flight_snapshot = db.lock_event_order().await;
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            emit_seeding_progress(&db, &dyn_sink, "seed", SEEDING_STATUS_ACTIVE, ""),
+        )
+        .await;
+        assert!(blocked.is_err(), "seeding frame must wait for the snapshot");
+        assert!(progress_statuses(&sink).is_empty());
+
+        drop(in_flight_snapshot);
+        emit_seeding_progress(&db, &dyn_sink, "seed", SEEDING_STATUS_ACTIVE, "").await;
+        assert_eq!(progress_statuses(&sink), [3]);
     }
 
     /// BT 上传速率透传契约:活跃状态原样透传 `upload_speed_bps`(latch 进

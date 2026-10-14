@@ -130,7 +130,8 @@ export const GET: APIRoute = async ({ params, url }) => {
       const key = releaseObjectKey(release.tag_name, asset.name);
       if (await ossHasAsset(key, asset.size)) {
         try {
-          return downloadRedirect(ossDownloadUrl(key), "oss");
+          const target = ossDownloadUrl(key);
+          if (target) return downloadRedirect(target, "oss");
         } catch {
           // 签名失败同样遵循强制 OSS 的 503 / auto 与旧客户端的 GitHub 兜底策略。
         }
