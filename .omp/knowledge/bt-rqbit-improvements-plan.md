@@ -218,4 +218,19 @@ FluxDown 侧上游（`zerx-lab/FluxDown`）已从 `e2f031e0` 前进到 `254b3599
 - 无语义冲突残留：上游新增的 `disabled_pieces`/`piece_bitfield`/`transfer_activity` 等改动已并入，本分支的 `bt_upload_snapshot` checkpoint、`bt_peer_connect_limit`/`bt_session_peer_limit` 两键、`BtPeerStats` 聚合均保留。
 - `crates/app/src/windows/new_download.rs` 的 rustfmt 差异是**本机 rustfmt 版本漂移**（上游原版同样会被改写），非本分支引入，保持上游原样不动。
 
-未覆盖面：Android（本机无 Android SDK）与 iOS（非 macOS）未做编译/运行验证，仅静态核对目录项、设置行、i18n 键与「不进同步目录」；PG 未跑（无隔离实例），checkpoint 的事务/幂等语义由 SQLite 用例覆盖，SQL 文本两后端共用同一份条件 UPDATE。
+未覆盖面：Android（本机无 Android SDK）与 iOS（非 macOS）未做编译/运行验证，仅静态核对目录项、设置行、i18n 键与「不进同步目录」；PG 已用 podman 隔离实例（`postgres:17-alpine`，`localhost:55432`）实测 `pg_smoke_roundtrip` 与新增 `pg_upload_checkpoint_is_idempotent_and_never_rolls_back`（7 个 checkpoint 状态迁移全部通过，与 SQLite 同语义）。
+
+### 复核结论（2026-10-16 晚，逐条）
+
+计划书没有未完成的实施项：步骤 2–7 的代码、配置、i18n、跨端镜像均已落地。§Verification 的 8 项此前 2 项为 ◐，现均补齐，其余 6 项此前已实跑。剩余未覆盖面仅为**本机环境不可达**的部分：
+
+| 剩余未覆盖 | 原因 | 是否阻塞 |
+|---|---|---|
+| Android 编译/运行（`gradlew`、设置页视觉） | 本机无 Android SDK、无 Android Studio JBR | 否：仅能构建验证，非方案缺陷 |
+| iOS 编译/运行 | 本机非 macOS | 否：同上 |
+| §1 中「session 预算 + 多个选同一 peer 的 torrent」 | 该预算按 session 计数，不是 per-peer 去重表，无从用自定义预算触发 | 否：计划未要求 |
+| §7 公网双栈 DHT 失败诊断 | 需真实公网环境 | 否：计划明示「公网失败算不上代码回归」 |
+| §5 Windows sparse / 嵌套目录恢复 | 本机 Linux | 否：计划要求 Windows 单独验证 |
+| §2 上传期 B/C 断连-重连竞态 | 现有 e2e 已覆盖连接建立与上传；该时序无既知缺陷 | 否 |
+
+新增验证项（本轮）：`multi_torrent_budget`（5 torrent 共享 session 预算的真实 loopback 争用）、`bootstrap_succeeds_when_one_address_family_works`（真实 UDP 双栈归因）、`pg_upload_checkpoint_is_idempotent_and_never_rolls_back`（PG checkpoint 幂等）。
