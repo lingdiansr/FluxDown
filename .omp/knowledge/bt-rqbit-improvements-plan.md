@@ -204,6 +204,18 @@
 | 7 DHT 双栈失败归因 | ✅ 已补：`bootstrap_succeeds_when_one_address_family_works` 用真实本地 UDP 节点 + 双族解析的主机名（仅 v4 有监听）端到端跑通：单族可达即计成功，且断言 v6 失败计数确实增长（否则两族都成功也会通过）。仍无公网双栈失败诊断 |
 | 1 多 torrent round-robin 真实入站 | ✅ 已补：`multi_torrent_shares_the_session_budget_without_starving_any_torrent`——5 个 torrent 对同一做种 session 真实 loopback 下载，共享一个不足以同时容纳全部 torrent 的 session 预算；断言同时 live 的 torrent 数 `< 5`（预算未被争用时测试即失败）、每个 torrent 都拿到 peer、session 逻辑 peer 峰值不超预算。真实入站握手（出站饱和时被入站建立）仍未覆盖 |
 
-验证面：rqbit `--lib` 95 通过（含本轮新增 `multi_torrent_budget`）、`librqbit-dht` 30 通过；FD `fluxdown_engine --lib` 1256 通过、`fluxdown_protocol` / `fluxdown_daemon` / `fluxdown_api` / `fluxdown_mobile` 通过；Web `bun test` 268 通过、`bun run build` 通过；`cargo clippy --workspace --exclude fluxdown_server --all-targets -D warnings` 通过；release.yml 的 librqbit 校验逻辑本地复跑通过。
+验证面：rqbit `--lib` 95 通过（含本轮新增 `multi_torrent_budget`）、`librqbit-dht` 30 通过；FD `fluxdown_engine --lib` 1274 通过（合并 254b3599 后）、`fluxdown_protocol` / `fluxdown_daemon` / `fluxdown_engine_protocol` 通过；Web `bun test src/lib/rpc` 45 通过；`cargo clippy --workspace --exclude fluxdown_server --all-targets -D warnings` 通过；release.yml 的 librqbit 校验逻辑本地复跑通过。
+
+### 再次同步上游（2026-10-16 晚）
+
+rqbit 侧**无需同步**：`ikatson/rqbit` main 仍是 `57e95d16`，与本仓 `feat/bt-improvements` 的分叉点一致；fork 前缀已推送在 `lingdiansr/rqbit` main（`076d8a06`），FD 生产 pin 正是这一 revision。
+
+FluxDown 侧上游（`zerx-lab/FluxDown`）已从 `e2f031e0` 前进到 `254b3599`（43 提交），已合并进 `feat/bt-rqbit-sync`。合并面：
+
+- 唯一内容冲突在 `native/engine/src/bt_downloader.rs`。上游 `99a148e2`「删除无调用方的死代码」删掉了 `default_tracker_list()` 并把 tracker 合并**内联**进 `SharedBtSession::new`；本分支 `5e2219d3` 已把同一逻辑抽成 `merged_tracker_urls()`，并**有意**改语义为「PUBLIC_TRACKERS 恒为超集，custom/subscription 只做追加」，还新增了测试调用它。上游内联版本反而是旧语义（`custom_trackers` 非空即丢弃内置列表），故保留本分支 helper 与调用点，另删掉全仓零引用的 `default_tracker_list`（与上游删除决定一致）。
+- 上游 `ProgressUpdate` 新增 `deleted_tasks`（批量删除通知，其余字段无意义）；本分支唯一未走 `..Default::default()` 的 BT 完成帧补 `Vec::new()`。
+- `git merge-tree` 预演出的其余 17 个交集文件（`Cargo.lock`、`assets/i18n/*`、`native/protocol/*`、`web/src/lib/rpc/*` 等）全部自动合并。
+- 无语义冲突残留：上游新增的 `disabled_pieces`/`piece_bitfield`/`transfer_activity` 等改动已并入，本分支的 `bt_upload_snapshot` checkpoint、`bt_peer_connect_limit`/`bt_session_peer_limit` 两键、`BtPeerStats` 聚合均保留。
+- `crates/app/src/windows/new_download.rs` 的 rustfmt 差异是**本机 rustfmt 版本漂移**（上游原版同样会被改写），非本分支引入，保持上游原样不动。
 
 未覆盖面：Android（本机无 Android SDK）与 iOS（非 macOS）未做编译/运行验证，仅静态核对目录项、设置行、i18n 键与「不进同步目录」；PG 未跑（无隔离实例），checkpoint 的事务/幂等语义由 SQLite 用例覆盖，SQL 文本两后端共用同一份条件 UPDATE。
