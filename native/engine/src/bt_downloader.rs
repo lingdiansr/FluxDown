@@ -311,13 +311,6 @@ fn merged_tracker_urls(custom_trackers: &str, subscription_trackers: &str) -> Ha
     merged.iter().filter_map(|s| s.parse().ok()).collect()
 }
 
-/// Return the built-in public tracker list as a newline-separated string.
-/// Used to populate the default config value on first launch so users can
-/// see and edit the full list in Settings.
-pub fn default_tracker_list() -> String {
-    PUBLIC_TRACKERS.join("\n")
-}
-
 // ---------------------------------------------------------------------------
 // BT configuration — user-settable via the Settings page
 // ---------------------------------------------------------------------------
