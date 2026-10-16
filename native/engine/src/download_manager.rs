@@ -17054,6 +17054,79 @@ mod tests {
         );
     }
 
+    /// A failed checkpoint submit must leave the reporter's cache untouched so
+    /// the same sample is re-sent, and the retry must count the bytes exactly
+    /// once — not zero times (dropped) and not twice (double counted).
+    #[tokio::test]
+    async fn bt_upload_checkpoint_failure_keeps_sample_pending_and_retry_counts_once() {
+        let (dir, db, injector) = sqlite_fault_fixture("bt_upload_checkpoint").await;
+        insert_task_at_status(&db, "bt-up", &dir.to_string_lossy(), "file.bin", 1).await;
+
+        // Reject the first checkpoint write only; the retry must go through.
+        sqlx::query(
+            "CREATE TRIGGER reject_bt_upload BEFORE UPDATE OF uploaded_bytes ON tasks \
+             WHEN NEW.uploaded_bytes > 0 AND (SELECT COUNT(*) FROM config WHERE key = 'bt_test_armed') = 0 \
+             BEGIN SELECT RAISE(FAIL, 'checkpoint write rejected'); END",
+        )
+        .execute(&injector)
+        .await
+        .expect("install checkpoint failure");
+
+        let (tx, rx) = mpsc::channel(8);
+        let sink = Arc::new(RecordingSink::new());
+        let handle = tokio::spawn(progress_reporter(rx, db.clone(), sink));
+
+        let sample = |bytes: u64| ProgressUpdate {
+            task_id: "bt-up".to_string(),
+            status: 1,
+            downloaded_bytes: 10,
+            total_bytes: 100,
+            uploaded_bytes: bytes as i64,
+            bt_upload_snapshot: Some(crate::downloader::BtUploadSnapshot {
+                live_epoch: 1,
+                uploaded_bytes: bytes,
+            }),
+            ..Default::default()
+        };
+
+        // First frame: the write fails, so nothing may be persisted.
+        tx.send(sample(500)).await.expect("send failing frame");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            db.get_task_uploaded_bytes("bt-up")
+                .await
+                .expect("read total"),
+            0,
+            "a rejected checkpoint must not persist any bytes"
+        );
+
+        // Disarm the failure; the reporter still holds the sample as pending.
+        sqlx::query("INSERT INTO config (key, value) VALUES ('bt_test_armed', '1')")
+            .execute(&injector)
+            .await
+            .expect("disarm");
+
+        // Re-sending the same sample must now commit it exactly once.
+        tx.send(sample(500)).await.expect("send retry");
+        tx.send(sample(500)).await.expect("send duplicate retry");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            db.get_task_uploaded_bytes("bt-up")
+                .await
+                .expect("read total"),
+            500,
+            "the retried sample must be counted exactly once"
+        );
+
+        drop(tx);
+        handle.await.expect("reporter must finish");
+
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            // Windows 上 DB 句柄可能仍持有目录；清理不改变行为断言结果。
+            crate::logger::report_warning("download-manager-test", "remove test directory", &error);
+        }
+    }
+
     fn progress_statuses(sink: &RecordingSink) -> Vec<i32> {
         sink.events()
             .into_iter()
