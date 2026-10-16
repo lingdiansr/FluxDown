@@ -5873,6 +5873,9 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     seeding_status,
                     seeding_message: seeding_message.to_string(),
                     seeding_time_secs: seed_time_base,
+                    // Not a batch-delete notification: this frame carries the
+                    // completed task's final state.
+                    deleted_tasks: Vec::new(),
                 })
                 .await
                 .is_err()
