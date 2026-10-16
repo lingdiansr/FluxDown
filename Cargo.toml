@@ -49,7 +49,7 @@ wildcard_imports = "deny"
 # + fastresume 采样拒绝哈希不匹配 + StatsSnapshot.live_epoch 上传代际
 # + peer 需求/上传队列/拒绝计数聚合（useful_peers、connection_* 不再逐 peer 求和）。
 # 上游修复发布后删除本条与 third_party/ 副本。
-librqbit = { git = "https://github.com/lingdiansr/rqbit", rev = "70a73c2e16c2f2332236d88baa49cd2526e86b04" }
+librqbit = { git = "https://github.com/lingdiansr/rqbit", rev = "076d8a064216d754792a6d839b42bc20bab560c7" }
 # 上游 0.7.0 在 iOS 上编译失败（Apple 平台只放行 macOS 的按索引绑定），补丁见源码内 `FluxDown 补丁` 注释；
 # 上游修复发布后删除本条与 third_party/ 副本。
 librqbit-dualstack-sockets = { path = "third_party/librqbit-dualstack-sockets" }

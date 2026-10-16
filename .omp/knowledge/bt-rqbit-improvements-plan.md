@@ -182,12 +182,27 @@
 ## 落地记录（2026-10-16）
 
 计划内步骤 2–7 全部落地；库侧发布在 `lingdiansr/rqbit` main（`zerx-lab/rqbit` 无写权限，
-其 main 仍停在 `00374a6d`），FD 侧 pin 与 release.yml 校验前缀已同步。
+其 main 仍停在 `00374a6d`）。**决定（B 方案）**：接受 `lingdiansr/rqbit` 为该 librqbit fork 的
+长期依赖源，FD 的 pin 与 release.yml 校验前缀均指向它，不再回切 `zerx-lab`。
 
 | 层 | 提交 |
 |---|---|
-| rqbit | `d6c5884f` 有界准入 / 轮换 / 发现池 / tracker 预算 / DHT 计数；`cd181c3b` `live_epoch`；`80c72d3e` peer 需求与上传队列计数；`d995b0c9` 上传计数进 `StatsSnapshot` |
-| FD | `5f69ea76` payload/位图跨任务保护；`34e745a4` pin 与 CI 校验；`c421c2f3` 半开/会话预算两键；`e2f76566` 上传幂等 checkpoint；`e8e01453` 上传与需求计数；`a4adac14` i18n |
+| rqbit | `d6c5884f` 有界准入 / 轮换 / 发现池 / tracker 预算 / DHT 计数；`cd181c3b` `live_epoch`；`80c72d3e` peer 需求与上传队列计数；`d995b0c9` 上传计数进 `StatsSnapshot`；`c17ed3ae` peer 质量聚合（去逐 peer 求和）；`70a73c2e` 三 peer 上传 e2e + 聚合单测（含修「新建连接默认 interested 漏计」）；`076d8a06` 30000 候选规模压测 + 20 真实 tracker 并发峰值实测 |
+| FD | `5f69ea76` payload/位图跨任务保护；`34e745a4` pin 与 CI 校验；`c421c2f3` 半开/会话预算两键；`e2f76566` 上传幂等 checkpoint；`e8e01453` 上传与需求计数；`a4adac14` i18n；`8a87dd97` 边界结清 + 诊断日志 + 去分配 + 文档；`fae4a4c1` checkpoint 故障注入测试 |
+
+计划 `§Verification` 的覆盖状态（本机实跑）：
+
+| 验证项 | 状态 |
+|---|---|
+| 8 真实设置表面（headless + `/rpc`） | ✅ 已跑：默认 64/1024、越界 31/257/127/4097/513 拒绝、合法值持久化，会话日志逐项核对 |
+| 已有 E2E `test_e2e_download_{tcp,utp}`（`E2E_NUM_SERVERS=3`） | ✅ 已跑通过 |
+| 2 上传期三 peer | ✅ 新增 `test_upload_while_downloading_{tcp,utp}`（A 做种 / B 限速下载中 / C 只连 B） |
+| 3 累计与 handoff（含提交故障重送） | ✅ SQLite 幂等 + 触发器故障注入；PG 未覆盖（无隔离实例） |
+| 4 恢复与损坏位图 | ✅ 已有 `test_fastresume_rejects_phantom_have_piece` 实跑通过；嵌套多文件 / Windows sparse 未覆盖 |
+| 5 发现有界性 | ✅ 注入 30000 候选的规模压测：池不超上限、最老被淘汰、live 不被牺牲、新 peer 仍可入 |
+| 6 tracker 调度 | ✅ 20 个真实本地 HTTP tracker（服务端各自记录并发）+ 默认预算 8：全部收到 announce、实测峰值 ≤ 8 |
+| 7 DHT 双栈失败归因 | ◐ 计数已实现 + `bootstrap_failures_are_attributed_to_dns_and_families` 单测；未做真实 UDP 双栈端到端 |
+| 1 多 torrent round-robin 真实入站 | ◐ 单测覆盖公平轮转 / 拒绝不丢；未做多 torrent 真实 loopback 拓扑 |
 
 验证面：rqbit `--lib` 89 通过；FD `fluxdown_engine --lib` 1256 通过、`fluxdown_protocol` / `fluxdown_daemon` / `fluxdown_api` / `fluxdown_mobile` 通过；Web `bun test` 268 通过、`bun run build` 通过；`cargo clippy --workspace --exclude fluxdown_server --all-targets -D warnings` 通过；release.yml 的 librqbit 校验逻辑本地复跑通过。
 

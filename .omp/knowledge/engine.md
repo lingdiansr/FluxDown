@@ -76,9 +76,12 @@
   × 超时另行约束在 ~200–300。下调前先实测。
 - **uTP（`bt_enable_utp`，默认开）**：开启时监听模式为 `TcpAndUtp`，出站并发拨 TCP + uTP；
   #825 实测在 peer 上限 512 基础上稳态再翻倍，代价是 UDP 收发的系统态 CPU 明显更高（上游仍标为
-  experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `lingdiansr/rqbit` 的 `main`
-  （上游 main + MSE + Android HTTPS + 握手超时下发修复），升级上游时先在该 fork 的 main
-  合并上游，再改根 `Cargo.toml` 的 rev。
+  experimental）。改动经 daemon 重建共享会话生效。librqbit 的**唯一依赖源是
+  `lingdiansr/rqbit` main**（= ikatson 上游 main + MSE、Android HTTPS 修复、peer 准入与
+  有界发现/上传队列、fastresume 采样校验、上传代际等 fork 增量）；`zerx-lab/rqbit` 只剩
+  历史 `00374a6d`，不再是依赖源。升级上游时先在该 fork 的 main 合并上游，再改根
+  `Cargo.toml` 的 rev 与 `.github/workflows/release.yml` 的校验前缀（两者必须同改，
+  流水线要求「请求 rev == 解析 rev」）。
 - **BT 会话保活与完成校验**：`maybe_release_bt_session` 在存在「已暂停的未完成
   torrent（句柄在册）」时**不拆**共享会话——resume 走 `unpause`（Paused→Live
   零校验秒恢复）；全部 BT 任务终态化（完成/删除且无做种）才释放。暂停撞上
