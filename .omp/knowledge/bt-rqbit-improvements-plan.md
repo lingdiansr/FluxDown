@@ -188,7 +188,7 @@
 
 | 层 | 提交 |
 |---|---|
-| rqbit | `d6c5884f` 有界准入 / 轮换 / 发现池 / tracker 预算 / DHT 计数；`cd181c3b` `live_epoch`；`80c72d3e` peer 需求与上传队列计数；`d995b0c9` 上传计数进 `StatsSnapshot`；`c17ed3ae` peer 质量聚合（去逐 peer 求和）；`70a73c2e` 三 peer 上传 e2e + 聚合单测（含修「新建连接默认 interested 漏计」）；`076d8a06` 30000 候选规模压测 + 20 真实 tracker 并发峰值实测 |
+| rqbit | `d6c5884f` 有界准入 / 轮换 / 发现池 / tracker 预算 / DHT 计数；`cd181c3b` `live_epoch`；`80c72d3e` peer 需求与上传队列计数；`d995b0c9` 上传计数进 `StatsSnapshot`；`c17ed3ae` peer 质量聚合（去逐 peer 求和）；`70a73c2e` 三 peer 上传 e2e + 聚合单测（含修「新建连接默认 interested 漏计」）；`076d8a06` 30000 候选规模压测 + 20 真实 tracker 并发峰值实测；`e2b7e62a` 多 torrent 真实拓扑 + DHT 双栈归因；`6f9d64b3` 轮换阈值收紧（120s/120s/300s/90% → 30s/30s/60s/50%）+ 判定抽成纯函数 `turnover_eligible` |
 | FD | `5f69ea76` payload/位图跨任务保护；`34e745a4` pin 与 CI 校验；`c421c2f3` 半开/会话预算两键；`e2f76566` 上传幂等 checkpoint；`e8e01453` 上传与需求计数；`a4adac14` i18n；`8a87dd97` 边界结清 + 诊断日志 + 去分配 + 文档；`fae4a4c1` checkpoint 故障注入测试 |
 
 计划 `§Verification` 的覆盖状态（本机实跑）：
@@ -209,7 +209,7 @@
 
 ### 再次同步上游（2026-10-16 晚）
 
-rqbit 侧**无需同步**：`ikatson/rqbit` main 仍是 `57e95d16`，与本仓 `feat/bt-improvements` 的分叉点一致；fork 前缀已推送在 `lingdiansr/rqbit` main（`076d8a06`），FD 生产 pin 正是这一 revision。
+rqbit 侧**无需同步**：`ikatson/rqbit` main 仍是 `57e95d16`，与本仓 `feat/bt-improvements` 的分叉点一致；fork 前缀已推送在 `lingdiansr/rqbit` main（现为 `6f9d64b3`），FD 生产 pin 已同步到该 revision。
 
 FluxDown 侧上游（`zerx-lab/FluxDown`）已从 `e2f031e0` 前进到 `254b3599`（43 提交），已合并进 `feat/bt-rqbit-sync`。合并面：
 
