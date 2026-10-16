@@ -85,7 +85,7 @@ GitHub compare 页面显示 `lingdiansr:main...ikatson:main` 有 **19 个提交�
 
 ### 2.3 与 FluxDown 实际依赖的关系
 
-当前 FluxDown 根 `Cargo.toml` 使用的是 `zerx-lab/rqbit` 的固定 revision，而不是直接使用 `lingdiansr/rqbit` 主分支。
+当前 FluxDown 根 `Cargo.toml` 使用的是 `lingdiansr/rqbit` 的固定 revision，而不是直接使用 `lingdiansr/rqbit` 主分支。
 
 因此：
 
@@ -493,7 +493,7 @@ FluxDown 的目标更广，还包括 Android/iOS。若要将 rqbit 核心提升�
 
 1. 固定上游 commit 和版本。
 2. 对 `lingdiansr` 与上游的 19 个提交逐个审计。
-3. 对 FluxDown 实际使用的 `zerx-lab/rqbit` revision 做三方 diff：
+3. 对 FluxDown 实际使用的 `lingdiansr/rqbit` revision 做三方 diff：
    - 当前 FluxDown pin。
    - `lingdiansr` 对应祖先。
    - `ikatson` 当前主线。
@@ -799,7 +799,7 @@ download = 120 KiB/s
   → 磁盘、恢复和长期 soak
 ```
 
-在监测数据证明当前数据面不足以前，不建议直接切换 libtorrent。应先审计当前固定的 `zerx-lab/rqbit` revision，并优先吸收与 listener、handshake、DHT、request window、连接统计相关的上游修复。
+在监测数据证明当前数据面不足以前，不建议直接切换 libtorrent。应先审计当前固定的 `lingdiansr/rqbit` revision，并优先吸收与 listener、handshake、DHT、request window、连接统计相关的上游修复。
 
 ## 8.6 当前实现切片
 
@@ -996,7 +996,7 @@ Clash TUN 或透明代理开启
 5. 只有在提高连接上限并恢复 DHT 后仍明显低于基准，才继续定位 piece 调度或 storage。
 # 十、Pinned `librqbit` 参数总表与第一阶段调优决策
 
-本章以 FluxDown 根 `Cargo.toml` 的 `[patch.crates-io]` 为版本边界：`zerx-lab/rqbit` revision `00374a6d772d4123f079f5adf6a1fe013e363381`（2026-10-12 随上游 #825 更新，此前为 `d9e79c939f223679612cd0b06bd00ed49bd2eff8`）。上游 `ikatson/rqbit` 只用于 API 语义对照；上游默认值不覆盖 pinned fork 的运行结论。`peer_limit` 是每 torrent 上限，也是 `SessionOptions` 的会话缺省，但不是 session 全局连接上限。
+本章以 FluxDown 根 `Cargo.toml` 的 `[patch.crates-io]` 为版本边界：`lingdiansr/rqbit` revision `d995b0c9583faf08b42bd55ddfa0ee529e5ec9c1`（2026-10-12 随上游 #825 更新，此前为 `d9e79c939f223679612cd0b06bd00ed49bd2eff8`）。上游 `ikatson/rqbit` 只用于 API 语义对照；上游默认值不覆盖 pinned fork 的运行结论。`peer_limit` 是每 torrent 上限，也是 `SessionOptions` 的会话缺省，但不是 session 全局连接上限。
 
 ## 10.1 版本、参数作用域与生效规则
 
@@ -1068,7 +1068,7 @@ Clash TUN 或透明代理开启
 
 |检查|结论|
 |---|---|
-|FluxDown pin|`Cargo.toml` patch 与 checkout 都是 `00374a6d772d4123f079f5adf6a1fe013e363381`（2026-10-12 起）|
+|FluxDown pin|`Cargo.toml` patch 与 checkout 都是 `d995b0c9583faf08b42bd55ddfa0ee529e5ec9c1`（2026-10-16 起）|
 |pinned 事实源|`crates/librqbit/src/session.rs`、`torrent_state/live/mod.rs`、`peer_connection`、DHT/limits/storage 模块|
 |上游对照|`ikatson/rqbit` README、公开 `AddTorrentOptions`/`ManagedTorrent`/`TorrentHandle` 语义；不把上游默认值写成 FluxDown 当前值|
 |代码验证|`cargo check -p fluxdown_engine --lib`、`cargo check -p fluxdown_protocol --lib`、daemon/protocol contract tests、Web settings tests|

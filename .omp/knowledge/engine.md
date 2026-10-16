@@ -76,7 +76,7 @@
   × 超时另行约束在 ~200–300。下调前先实测。
 - **uTP（`bt_enable_utp`，默认开）**：开启时监听模式为 `TcpAndUtp`，出站并发拨 TCP + uTP；
   #825 实测在 peer 上限 512 基础上稳态再翻倍，代价是 UDP 收发的系统态 CPU 明显更高（上游仍标为
-  experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `zerx-lab/rqbit` 的 `main`
+  experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `lingdiansr/rqbit` 的 `main`
   （上游 main + MSE + Android HTTPS + 握手超时下发修复），升级上游时先在该 fork 的 main
   合并上游，再改根 `Cargo.toml` 的 rev。
 - **BT 会话保活与完成校验**：`maybe_release_bt_session` 在存在「已暂停的未完成

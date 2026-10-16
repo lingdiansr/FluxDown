@@ -46,9 +46,10 @@ wildcard_imports = "deny"
 # + 会话级 peer 准入（PeerAdmission/DialScheduler，分离半开与已建立连接预算）
 # + 有界发现池与保守 peer 轮换 + tracker announce 共享并发预算 + DHT bootstrap 归因计数
 # + 有界公平上传队列（逐 peer 配额 / Request 去重 / Cancel 与 NotInterested 生效 / 连接代际校验）
-# + fastresume 采样拒绝哈希不匹配 + StatsSnapshot.live_epoch 上传代际。
+# + fastresume 采样拒绝哈希不匹配 + StatsSnapshot.live_epoch 上传代际
+# + peer 需求/上传队列/拒绝计数聚合（useful_peers、connection_* 不再逐 peer 求和）。
 # 上游修复发布后删除本条与 third_party/ 副本。
-librqbit = { git = "https://github.com/lingdiansr/rqbit", rev = "d995b0c9583faf08b42bd55ddfa0ee529e5ec9c1" }
+librqbit = { git = "https://github.com/lingdiansr/rqbit", rev = "c17ed3ae0e54747b711c078b4d7b3aff189ab573" }
 # 上游 0.7.0 在 iOS 上编译失败（Apple 平台只放行 macOS 的按索引绑定），补丁见源码内 `FluxDown 补丁` 注释；
 # 上游修复发布后删除本条与 third_party/ 副本。
 librqbit-dualstack-sockets = { path = "third_party/librqbit-dualstack-sockets" }

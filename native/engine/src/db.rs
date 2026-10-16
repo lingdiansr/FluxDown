@@ -6399,6 +6399,48 @@ mod tests {
         close_test_db(&db, dir).await;
     }
 
+    /// Settling at a boundary (pause, stop, session release) must recover the
+    /// bytes uploaded since the last periodic sample, and must stay a no-op
+    /// when the boundary sample is the one already reported.
+    #[tokio::test]
+    async fn settle_at_boundary_recovers_tail_without_double_counting() {
+        let (db, dir) = open_test_db().await;
+        insert_task_with_size(&db, "s1", 100).await;
+        let sample = |epoch: u64, bytes: u64| vec![("s1".to_string(), epoch, bytes)];
+
+        // Periodic tick reported 100, then 60 more bytes went out that no tick
+        // observed before the torrent was paused.
+        db.apply_bt_upload_snapshots("run-a", &sample(7, 100), &[])
+            .await
+            .expect("periodic");
+        let totals = db
+            .apply_bt_upload_snapshots("run-a", &sample(7, 160), &[])
+            .await
+            .expect("settle at pause");
+        assert_eq!(totals, vec![("s1".to_string(), 160)]);
+
+        // The same boundary sample replayed (retry after a lost commit, or a
+        // boundary that runs twice) must not add the tail again.
+        let totals = db
+            .apply_bt_upload_snapshots("run-a", &sample(7, 160), &[])
+            .await
+            .expect("replayed settle");
+        assert_eq!(totals, vec![("s1".to_string(), 160)]);
+
+        // Pause destroys the live instance, so resume starts a new epoch; its
+        // first sample counts from that instance's own counter, not zero.
+        let totals = db
+            .apply_bt_upload_snapshots("run-a", &sample(8, 25), &[])
+            .await
+            .expect("after resume");
+        assert_eq!(totals, vec![("s1".to_string(), 185)]);
+
+        let s1 = db.load_task_by_id("s1").await.expect("load").expect("s1");
+        assert_eq!(s1.uploaded_bytes, 185);
+
+        close_test_db(&db, dir).await;
+    }
+
     /// Exact byte-for-byte equality → no update, returns stored value.
     #[tokio::test]
     async fn resume_file_info_exact_match_no_update() {

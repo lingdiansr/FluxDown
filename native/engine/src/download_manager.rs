@@ -174,6 +174,10 @@ async fn rollback_seeding_registration(
     db: &Db,
     task_id: &str,
 ) -> Result<(), downloader::DownloadError> {
+    // 降级/回滚同样会销毁 live 实例：先结清最后一段上传，再结算做种时长。
+    if let Err(error) = bt.settle_upload(db, task_id).await {
+        crate::logger::report_error("download-manager", "settle upload on rollback", &error);
+    }
     bt.pause_task(task_id).await?;
     if let Some(seed) = bt.unregister_seeder(task_id).await {
         db.set_task_seeding_time(task_id, seed.seed_time_secs)
@@ -4360,6 +4364,14 @@ impl DownloadManager {
 
             let bt = self.bt_session.clone();
             if let Some(bt) = bt {
+                // 结清本 live 实例最后一段上传：pause 之后计数器就没了。
+                if let Err(error) = bt.settle_upload(&self.db, &task_id).await {
+                    crate::logger::report_error(
+                        "download-manager",
+                        "settle upload on stop",
+                        &error,
+                    );
+                }
                 if let Err(error) = bt.pause_task(&task_id).await {
                     crate::logger::report_error("download-manager", "stop seeding task", &error);
                     continue;
@@ -4502,6 +4514,10 @@ impl DownloadManager {
                 .await;
         }
         for (task_id, folded_secs) in demoted {
+            // 排队做种会被 pause：先结清最后一段 live 上传，再结算时长。
+            if let Err(error) = bt.settle_upload(&self.db, &task_id).await {
+                crate::logger::report_error("download-manager", "settle upload on demote", &error);
+            }
             if let Err(error) = bt.pause_task(&task_id).await {
                 crate::logger::report_error("download-manager", "pause seeding task", &error);
                 continue;
@@ -5865,6 +5881,13 @@ impl DownloadManager {
                     );
                 }
             }
+        }
+        // 释放前结清所有 live 实例的最后一段上传：会话一销毁计数器即消失，
+        // 之后的周期 tick 再也看不到这些字节。
+        if let Some(ref bt) = self.bt_session
+            && let Err(error) = bt.settle_all_uploads(&self.db).await
+        {
+            crate::logger::report_error("download-manager", "settle uploads on release", &error);
         }
         // Shut down on a background thread (same pattern as Drop) to avoid
         // blocking the actor loop while the librqbit runtime winds down.
@@ -8259,6 +8282,14 @@ impl DownloadManager {
             match task.seeding_status {
                 s if s == SEEDING_STATUS_ACTIVE || s == SEEDING_STATUS_QUEUED => {
                     if let Some(ref bt) = self.bt_session {
+                        // 结清本 live 实例最后一段上传（pause 会销毁它）。
+                        if let Err(error) = bt.settle_upload(&self.db, task_id).await {
+                            crate::logger::report_error(
+                                "download-manager",
+                                "settle upload on pause",
+                                &error,
+                            );
+                        }
                         if let Err(error) = bt.pause_task(task_id).await {
                             crate::logger::report_error(
                                 "download-manager",
@@ -11068,7 +11099,13 @@ impl DownloadManager {
 
     /// 取消所有在途任务并等待下载 task 与 BT/DHT 持久化退出。
     pub async fn shutdown(&mut self) {
-        // 做种时长平时只在状态迁移/顺带写/30 分钟兜底时落库，正常关机在此结算。
+        // 装机时长平时只在状态迁移/顺带写/30 分钟兜底时落库，正常关机在此结算。
+        // 上传量同理：会话即将销毁，最后一段 live 计数必须先结清。
+        if let Some(ref bt) = self.bt_session
+            && let Err(error) = bt.settle_all_uploads(&self.db).await
+        {
+            crate::logger::report_error("download-manager", "settle uploads on shutdown", &error);
+        }
         self.flush_seed_times().await;
         let mut handles = Vec::new();
         for (_task_id, entry) in self.active_tasks.drain() {

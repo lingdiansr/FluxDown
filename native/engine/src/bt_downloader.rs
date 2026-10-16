@@ -1381,6 +1381,79 @@ impl SharedBtSession {
             .await
     }
 
+    /// Read the live upload counter of one torrent without changing its state.
+    ///
+    /// `None` when the torrent has no live instance (paused, or not tracked) —
+    /// there is then no counter to settle and callers must not invent a zero.
+    pub async fn live_upload_snapshot(
+        &self,
+        task_id: &str,
+    ) -> Option<crate::downloader::BtUploadSnapshot> {
+        let handle = self.handles.lock().await.get(task_id).cloned()?;
+        let live = handle.live()?;
+        let snapshot = live.stats_snapshot();
+        Some(crate::downloader::BtUploadSnapshot {
+            live_epoch: snapshot.live_epoch,
+            uploaded_bytes: snapshot.uploaded_bytes,
+        })
+    }
+
+    /// Settle a torrent's live upload counter into the database before its
+    /// live instance goes away.
+    ///
+    /// A live instance is destroyed by pausing, by stopping seeding, and by
+    /// releasing the whole session; its counter never survives. Everything
+    /// uploaded since the last periodic sample would therefore be lost unless
+    /// it is committed at the boundary. Committing through the checkpoint
+    /// entry keeps this idempotent, so settling a sample the periodic tick
+    /// already reported is a no-op rather than a double count.
+    ///
+    /// Errors are returned, not swallowed: a failed settle must be visible so
+    /// the caller can decide whether to proceed with the destructive step.
+    pub async fn settle_upload(
+        &self,
+        db: &crate::db::Db,
+        task_id: &str,
+    ) -> Result<(), crate::db::DbError> {
+        let Some(snapshot) = self.live_upload_snapshot(task_id).await else {
+            return Ok(());
+        };
+        db.apply_bt_upload_snapshots(
+            crate::upload_source_instance(),
+            &[(
+                task_id.to_owned(),
+                snapshot.live_epoch,
+                snapshot.uploaded_bytes,
+            )],
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Settle every tracked torrent's live upload counter.
+    ///
+    /// Used before releasing the whole session, where no single task list is
+    /// authoritative. Torrents without a live instance are skipped.
+    pub async fn settle_all_uploads(&self, db: &crate::db::Db) -> Result<(), crate::db::DbError> {
+        let task_ids: Vec<String> = {
+            let map = self.handles.lock().await;
+            map.keys().cloned().collect()
+        };
+        let mut samples = Vec::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            if let Some(snapshot) = self.live_upload_snapshot(&task_id).await {
+                samples.push((task_id, snapshot.live_epoch, snapshot.uploaded_bytes));
+            }
+        }
+        if samples.is_empty() {
+            return Ok(());
+        }
+        db.apply_bt_upload_snapshots(crate::upload_source_instance(), &samples, &[])
+            .await?;
+        Ok(())
+    }
+
     /// Unregister a seeder (active or queued). Returns its final cumulative
     /// seeding time for persistence, or `None` if it was not registered.
     pub async fn unregister_seeder(&self, task_id: &str) -> Option<UnregisteredSeed> {
@@ -3059,31 +3132,24 @@ fn build_bt_segments(
     )
 }
 
-const USEFUL_PEER_BYTES: u64 = 1024 * 1024;
-
-/// Convert librqbit's live torrent and peer snapshots into an engine-owned
-/// sample. The aggregate snapshot is allocation-free; the per-peer snapshot is
-/// used only to count useful peers and connection counters for the current
-/// live peer set.
+/// Convert librqbit's live snapshot into an engine-owned sample.
+///
+/// The snapshot is allocation-free: peer counts, upload throughput and the
+/// connection-quality aggregates all come from librqbit's aggregates rather
+/// than from walking per-peer records.
 fn bt_peer_stats_from_handle(handle: &BtHandle) -> Option<crate::transfer_activity::BtPeerStats> {
     let live = handle.live()?;
+    // Every counter below comes from librqbit's aggregates, which move with the
+    // same events the per-peer records do. Snapshotting each peer into a
+    // string-keyed map just to sum five numbers would allocate on every sample.
     let snapshot = live.stats_snapshot();
-    let peers = live.per_peer_stats_snapshot(Default::default());
-    let mut useful_peers = 0u32;
-    let mut connection_attempts = 0u32;
-    let mut connection_successes = 0u32;
-    let mut connection_errors = 0u32;
-    let mut total_connecting_ms = 0u64;
-
-    for peer in peers.peers.values() {
-        let counters = &peer.counters;
-        useful_peers =
-            useful_peers.saturating_add(u32::from(counters.fetched_bytes >= USEFUL_PEER_BYTES));
-        connection_attempts = connection_attempts.saturating_add(counters.connection_attempts);
-        connection_successes = connection_successes.saturating_add(counters.connections);
-        connection_errors = connection_errors.saturating_add(counters.errors);
-        total_connecting_ms = total_connecting_ms.saturating_add(counters.total_time_connecting_ms);
-    }
+    let useful_peers = snapshot.peer_stats.useful_peers;
+    // The connection aggregates are u64 in librqbit; the engine's sample type
+    // keeps the narrower historical width, so clamp rather than wrap.
+    let connection_attempts = u32::try_from(snapshot.connection_attempts).unwrap_or(u32::MAX);
+    let connection_successes = u32::try_from(snapshot.connection_successes).unwrap_or(u32::MAX);
+    let connection_errors = u32::try_from(snapshot.connection_errors).unwrap_or(u32::MAX);
+    let total_connecting_ms = snapshot.total_connecting_ms;
 
     let peer_stats = snapshot.peer_stats;
     Some(crate::transfer_activity::BtPeerStats {
@@ -5887,7 +5953,21 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 .unwrap_or(0);
 
             let peer_stats = bt_peer_stats_from_handle(&handle);
-            let (peers_live, peers_connecting, peers_queued, peers_seen, peers_dead) = peer_stats
+            let (
+                peers_live,
+                peers_connecting,
+                peers_queued,
+                peers_seen,
+                peers_dead,
+                peers_interested,
+                peers_uploading,
+                upload_requests,
+                upload_queue_depth,
+                uploaded_bytes_live,
+                incoming_rejected,
+                admission_rejected,
+            ) = peer_stats
+                .as_ref()
                 .map(|stats| {
                     (
                         stats.live,
@@ -5895,9 +5975,16 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         stats.queued,
                         stats.seen,
                         stats.dead,
+                        stats.interested_peers.unwrap_or(0),
+                        stats.uploading_peers.unwrap_or(0),
+                        stats.upload_requests.unwrap_or(0),
+                        stats.upload_queue_depth.unwrap_or(0),
+                        stats.uploaded_bytes.unwrap_or(0),
+                        stats.incoming_rejected.unwrap_or(0),
+                        stats.admission_rejected.unwrap_or(0),
                     )
                 })
-                .unwrap_or((0, 0, 0, 0, 0));
+                .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
 
             let downloaded_pieces = stats
                 .live
@@ -5938,7 +6025,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 || last_progress_log.is_none_or(|t| t.elapsed() >= PROGRESS_LOG_INTERVAL);
             if should_log {
                 log_info!(
-                    "[BT] task={} state={:?} progress={}/{} (checked={}, fetched={}) pieces={}/{} down={} B/s up={} B/s peers(live={} connecting={} queued={} seen={} dead={})",
+                    "[BT] task={} state={:?} progress={}/{} (checked={}, fetched={}) pieces={}/{} down={} B/s up={} B/s peers(live={} connecting={} queued={} seen={} dead={}) demand(interested={} uploading={}) upload(requests={} queue={} bytes={}) rejected(incoming={} admission={})",
                     short_id(&task_id),
                     stats.state,
                     progress,
@@ -5953,7 +6040,14 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     peers_connecting,
                     peers_queued,
                     peers_seen,
-                    peers_dead
+                    peers_dead,
+                    peers_interested,
+                    peers_uploading,
+                    upload_requests,
+                    upload_queue_depth,
+                    uploaded_bytes_live,
+                    incoming_rejected,
+                    admission_rejected
                 );
                 last_progress_log = Some(Instant::now());
                 last_logged_status = status_code;
