@@ -7594,6 +7594,83 @@ mod tests {
         db.delete_config("pg_smoke_key").await.expect("clean cfg");
     }
 
+    /// PostgreSQL 上传 checkpoint 检查（需要本地 pg 实例）：
+    /// `PG_TEST_URL=postgres://postgres:pw@localhost/postgres \
+    ///  cargo test -p fluxdown_engine -- --ignored pg_upload_checkpoint`
+    ///
+    /// SQLite 的幂等语义由 `apply_bt_upload_snapshots_is_idempotent_per_source_and_epoch`
+    /// 覆盖，但计划要求 PG 也验证「同一事务内的条件 UPDATE 不漏计、不重复、不回退」。
+    /// PG 走的是同一条 SQL 文本（`$1..$4` 形式），这里真跑一遍证明它成立。
+    #[tokio::test]
+    #[ignore = "requires a running PostgreSQL instance (set PG_TEST_URL)"]
+    async fn pg_upload_checkpoint_is_idempotent_and_never_rolls_back() {
+        let url = std::env::var("PG_TEST_URL")
+            .unwrap_or_else(|_| "postgres://postgres:pw@localhost/postgres".to_owned());
+        let db = Db::connect(&url).await.expect("connect pg");
+        let id = format!("pg-upload-ckpt-{}", std::process::id());
+        db.delete_task(&id).await.expect("pre-clean");
+        insert_task_with_size(&db, &id, 100).await;
+
+        // FREEZE 用同一个冻结 epoch，跑完整状态机；TURNOVER 跨 run/epoch 累计。
+        let snap = |epoch: u64, bytes: u64| vec![(id.clone(), epoch, bytes)];
+
+        // 1) 同一 source+epoch 首次提交：累计 = checkpoint。
+        let totals = db
+            .apply_bt_upload_snapshots("pg-run-a", &snap(1, 100), &[])
+            .await
+            .expect("first");
+        assert_eq!(totals, vec![(id.clone(), 100)], "首次提交应计入 100");
+
+        // 2) 重放同一采样：不得重复计入。
+        let totals = db
+            .apply_bt_upload_snapshots("pg-run-a", &snap(1, 100), &[])
+            .await
+            .expect("replay");
+        assert_eq!(totals, vec![(id.clone(), 100)], "重放不得重复计入");
+
+        // 3) 同一 epoch 内增长：只加差值，做种时间同行更新。
+        let totals = db
+            .apply_bt_upload_snapshots("pg-run-a", &snap(1, 140), &[])
+            .await
+            .expect("growth");
+        assert_eq!(totals, vec![(id.clone(), 140)], "同 epoch 增长应只加差值");
+
+        // 4) 迟到的旧采样：既不能回退也不能再计入。
+        let totals = db
+            .apply_bt_upload_snapshots("pg-run-a", &snap(1, 120), &[])
+            .await
+            .expect("stale");
+        assert_eq!(totals, vec![(id.clone(), 140)], "旧采样不得回退累计");
+
+        // 5) 新 live 实例（epoch+1）自带计数：全部计入，不能靠「下降」判断。
+        let totals = db
+            .apply_bt_upload_snapshots("pg-run-a", &snap(2, 200), &[])
+            .await
+            .expect("new epoch");
+        assert_eq!(totals, vec![(id.clone(), 340)], "新 epoch 应全额计入");
+
+        // 6/7) 新 engine run 的独立计数，与上一 run 的 epoch 无关。
+        let totals = db
+            .apply_bt_upload_snapshots("pg-run-b", &snap(1, 60), &[])
+            .await
+            .expect("new run");
+        assert_eq!(totals, vec![(id.clone(), 400)], "新 run 应独立计入");
+        let totals = db
+            .apply_bt_upload_snapshots("pg-run-b", &snap(1, 60), &[])
+            .await
+            .expect("new run replay");
+        assert_eq!(totals, vec![(id.clone(), 400)], "新 run 重放不得重复");
+
+        let task = db
+            .load_task_by_id(&id)
+            .await
+            .expect("load")
+            .expect("present");
+        assert_eq!(task.uploaded_bytes, 400, "最终累计必须是 400");
+
+        db.delete_task(&id).await.expect("clean");
+    }
+
     // -----------------------------------------------------------------------
     // 文件跟踪（FluxDown #11）：update_task_file_missing / file_missing 读回一致性
     // -----------------------------------------------------------------------
