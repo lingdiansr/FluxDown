@@ -1367,7 +1367,7 @@ impl SharedBtSession {
         task_id: &str,
         handle: BtHandle,
         uploaded_at_completion: i64,
-        last_session_uploaded: i64,
+        last_committed_upload: Option<crate::downloader::BtUploadSnapshot>,
         seed_time_base_secs: i64,
     ) -> SeedingRegistration {
         self.seeding
@@ -1375,7 +1375,7 @@ impl SharedBtSession {
                 task_id.to_string(),
                 handle,
                 uploaded_at_completion,
-                last_session_uploaded,
+                last_committed_upload,
                 seed_time_base_secs,
             )
             .await
@@ -5065,10 +5065,16 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 .as_ref()
                 .map(|l| (l.upload_speed.mbps * 1024.0 * 1024.0) as i64)
                 .unwrap_or(0);
-            let uploaded_bytes = stats
-                .live
-                .as_ref()
-                .map(|l| l.snapshot.uploaded_bytes as i64)
+            let bt_upload_snapshot =
+                stats
+                    .live
+                    .as_ref()
+                    .map(|l| crate::downloader::BtUploadSnapshot {
+                        live_epoch: l.snapshot.live_epoch,
+                        uploaded_bytes: l.snapshot.uploaded_bytes,
+                    });
+            let uploaded_bytes = bt_upload_snapshot
+                .map(|s| s.uploaded_bytes as i64)
                 .unwrap_or(0);
 
             // BT 数据已全部下完，但校验与 staging→save_dir 搬移尚未开始，任务
@@ -5084,6 +5090,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     bt_data_finished: true,
                     upload_speed_bps,
                     uploaded_bytes,
+                    bt_upload_snapshot,
                     ..Default::default()
                 })
                 .await
@@ -5632,23 +5639,58 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // 发完成信号——file_name 指向真实存在的磁盘名。
             // Completion is committed below, after the seeding transition also succeeds.
 
-            // Compute the upload stats that accompany the completed signal.
-            let uploaded_bytes = db.get_task_uploaded_bytes(&task_id).await?;
+            // Settle the live counter at the handoff boundary before freezing
+            // the baseline: the seeding phase must continue from what was
+            // actually committed, not from a raw counter that a later
+            // pause/resume will reset. The checkpoint entry makes this settle
+            // idempotent, so a periodic frame that already reported the same
+            // sample cannot double-count here.
+            let live_snapshot = stats
+                .live
+                .as_ref()
+                .map(|l| crate::downloader::BtUploadSnapshot {
+                    live_epoch: l.snapshot.live_epoch,
+                    uploaded_bytes: l.snapshot.uploaded_bytes,
+                });
             let completed_upload_speed_bps = stats
                 .live
                 .as_ref()
                 .map(|l| (l.upload_speed.mbps * 1024.0 * 1024.0) as i64)
                 .unwrap_or(0);
-            let completed_uploaded_bytes = stats
-                .live
-                .as_ref()
-                .map(|l| l.snapshot.uploaded_bytes as i64)
-                .unwrap_or(uploaded_bytes);
+            let uploaded_bytes = match live_snapshot {
+                Some(snapshot) => match db
+                    .apply_bt_upload_snapshots(
+                        crate::upload_source_instance(),
+                        &[(
+                            task_id.clone(),
+                            snapshot.live_epoch,
+                            snapshot.uploaded_bytes,
+                        )],
+                        &[],
+                    )
+                    .await
+                {
+                    Ok(totals) => totals
+                        .into_iter()
+                        .next()
+                        .map(|(_, total)| total)
+                        .unwrap_or_else(|| 0),
+                    Err(e) => {
+                        // Do not fabricate a baseline from the raw counter:
+                        // the caller surfaces the error instead.
+                        return Err(DownloadError::Other(format!(
+                            "BT upload checkpoint at completion failed: {e:#}"
+                        )));
+                    }
+                },
+                // No live state at handoff: nothing to settle, the persisted
+                // total already is the baseline.
+                None => db.get_task_uploaded_bytes(&task_id).await?,
+            };
             // 分享率基线必须与 tasks.uploaded_bytes 同尺度（跨会话累计）：
-            // 会话计数器在暂停/恢复或跨重启续传后从零重计，直接用它做基线
-            // 会把先前会话的上传量算进「做种后分享率」。会话计数器只作
-            // last_session_uploaded 的增量基线。
-            let uploaded_at_completion = uploaded_bytes.max(completed_uploaded_bytes);
+            // 上面的结清已把它推进到最新，直接采用，不再取 max(库累计, 会话计数)。
+            let uploaded_at_completion = uploaded_bytes;
+            let completed_uploaded_bytes = uploaded_bytes;
 
             // Retain the handle in the cache (do NOT call take_handle); the
             // cached handle also lets future delete_task(delete_files=true)
@@ -5691,7 +5733,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         &task_id,
                         handle.clone(),
                         uploaded_at_completion,
-                        completed_uploaded_bytes,
+                        live_snapshot,
                         seed_time_base,
                     )
                     .await;
@@ -5754,6 +5796,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     upload_speed_bps: completed_upload_speed_bps,
                     bt_data_finished: false,
                     uploaded_bytes: completed_uploaded_bytes,
+                    // The handoff already settled the live counter through the
+                    // checkpoint, so this terminal frame carries no source: the
+                    // reporter keeps the settled cumulative it seeded from the
+                    // database instead of re-accounting the raw counter.
+                    bt_upload_snapshot: None,
                     seeding_status,
                     seeding_message: seeding_message.to_string(),
                     seeding_time_secs: seed_time_base,
@@ -5912,10 +5959,18 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             );
 
             // Persist cumulative upload for seeding ratio accounting.
-            let cumulative_upload = stats
-                .live
-                .as_ref()
-                .map(|l| l.snapshot.uploaded_bytes as i64)
+            // The raw counter is reported as a `(live instance, bytes)` pair;
+            // the checkpoint entry turns it into a cross-session cumulative.
+            let cumulative_upload_snapshot =
+                stats
+                    .live
+                    .as_ref()
+                    .map(|l| crate::downloader::BtUploadSnapshot {
+                        live_epoch: l.snapshot.live_epoch,
+                        uploaded_bytes: l.snapshot.uploaded_bytes,
+                    });
+            let cumulative_upload = cumulative_upload_snapshot
+                .map(|s| s.uploaded_bytes as i64)
                 .unwrap_or(0);
 
             if progress_tx
@@ -5930,6 +5985,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     runtime: Some(bt_runtime(&task_id, total, peer_stats)),
                     upload_speed_bps,
                     uploaded_bytes: cumulative_upload,
+                    bt_upload_snapshot: cumulative_upload_snapshot,
                     ..Default::default()
                 })
                 .await

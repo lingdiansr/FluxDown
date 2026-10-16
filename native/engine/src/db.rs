@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
+    bt_upload_source_instance TEXT NOT NULL DEFAULT '',
+    bt_upload_live_epoch BIGINT NOT NULL DEFAULT 0,
+    bt_upload_checkpoint_bytes BIGINT NOT NULL DEFAULT 0,
     seeding_status INTEGER NOT NULL DEFAULT 0,
     seeding_message TEXT NOT NULL DEFAULT '',
     seeding_started_at INTEGER NOT NULL DEFAULT 0,
@@ -307,6 +310,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
+    bt_upload_source_instance TEXT NOT NULL DEFAULT '',
+    bt_upload_live_epoch BIGINT NOT NULL DEFAULT 0,
+    bt_upload_checkpoint_bytes BIGINT NOT NULL DEFAULT 0,
     seeding_status INTEGER NOT NULL DEFAULT 0,
     seeding_message TEXT NOT NULL DEFAULT '',
     seeding_started_at INTEGER NOT NULL DEFAULT 0,
@@ -1105,6 +1111,20 @@ impl Db {
             .await?;
         self.add_column_if_missing(
             "tasks",
+            "bt_upload_source_instance",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        .await?;
+        self.add_column_if_missing("tasks", "bt_upload_live_epoch", "BIGINT NOT NULL DEFAULT 0")
+            .await?;
+        self.add_column_if_missing(
+            "tasks",
+            "bt_upload_checkpoint_bytes",
+            "BIGINT NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.add_column_if_missing(
+            "tasks",
             "uploaded_at_completion",
             "BIGINT NOT NULL DEFAULT 0",
         )
@@ -1592,44 +1612,83 @@ impl Db {
     }
 
     /// 原子增加任务已上传字节数，并返回更新后的累计值（BT 做种增量累计）。
-    pub async fn add_task_uploaded_bytes(&self, task_id: &str, delta: i64) -> Result<i64, DbError> {
-        sqlx::query("UPDATE tasks SET uploaded_bytes = uploaded_bytes + $1 WHERE id = $2")
-            .bind(delta)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await?;
-        let total: i64 = sqlx::query_scalar("SELECT uploaded_bytes FROM tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(total)
-    }
-
     /// 做种 tick 的批量落库：单事务内累加各任务的上传增量、写入做种时长快照，
     /// 返回有增量的任务更新后的累计上传字节。N 个做种者一轮只付一次提交代价。
-    pub async fn apply_seeding_tick(
+    /// Idempotent BT upload checkpoint.
+    ///
+    /// librqbit's per-live-instance `uploaded_bytes` resets on pause/resume.
+    /// A consumer that merely diffs successive samples cannot tell that reset
+    /// from "no new uploads", and re-sending a sample (lost commit receipt,
+    /// retry after a failure) must not double-count.
+    ///
+    /// The source identity is `(source_instance, live_epoch)`:
+    /// * same instance + same epoch  -> add `max(new - checkpoint, 0)`;
+    /// * same instance + older epoch, or an older sample of the same epoch
+    ///   -> add nothing;
+    /// * a new epoch or a new engine instance -> the new source's counter is
+    ///   independent, so all of its reported bytes count.
+    ///
+    /// Both the cumulative total and the checkpoint advance in the same
+    /// statement, so a replayed sample is a no-op rather than a second
+    /// increment.
+    pub async fn apply_bt_upload_snapshots(
         &self,
-        uploaded_deltas: &[(String, i64)],
+        source_instance: &str,
+        snapshots: &[(String, u64, u64)],
         seeding_times: &[(String, i64)],
     ) -> Result<Vec<(String, i64)>, DbError> {
-        if uploaded_deltas.is_empty() && seeding_times.is_empty() {
+        if snapshots.is_empty() && seeding_times.is_empty() {
             return Ok(Vec::new());
         }
         let mut tx = self.pool.begin().await?;
-        let mut totals = Vec::with_capacity(uploaded_deltas.len());
-        for (id, delta) in uploaded_deltas {
-            sqlx::query("UPDATE tasks SET uploaded_bytes = uploaded_bytes + $1 WHERE id = $2")
-                .bind(*delta)
-                .bind(id.as_str())
-                .execute(&mut *tx)
-                .await?;
-            let total: Option<i64> =
-                sqlx::query_scalar("SELECT uploaded_bytes FROM tasks WHERE id = $1")
-                    .bind(id.as_str())
-                    .fetch_optional(&mut *tx)
-                    .await?;
+        let mut totals = Vec::with_capacity(snapshots.len());
+        for (task_id, live_epoch, uploaded_bytes) in snapshots {
+            let live_epoch = i64::try_from(*live_epoch).unwrap_or(i64::MAX);
+            let uploaded_bytes = i64::try_from(*uploaded_bytes).unwrap_or(i64::MAX);
+            // The increment is expressed inside a single conditional UPDATE so
+            // concurrent/replayed writers cannot interleave a read and a write.
+            // All right-hand sides below read the *old* row, so the CASE
+            // guards all describe the state before this statement ran:
+            //   SAME_EPOCH  -> same engine run and same librqbit live instance
+            //   NEWER_EPOCH -> same engine run, later live instance
+            // The increment is `new - old_checkpoint` (never negative); an
+            // older or replayed sample falls through to 0. `CASE` rather than
+            // `MAX` because PostgreSQL's `max` is an aggregate, not a scalar.
+            let total: Option<i64> = sqlx::query_scalar(
+                "UPDATE tasks SET \
+                   uploaded_bytes = uploaded_bytes + CASE \
+                     WHEN bt_upload_source_instance = $2 AND bt_upload_live_epoch = $3 \
+                          AND $4 > bt_upload_checkpoint_bytes \
+                       THEN $4 - bt_upload_checkpoint_bytes \
+                     WHEN bt_upload_source_instance = $2 AND bt_upload_live_epoch = $3 \
+                       THEN 0 \
+                     ELSE $4 \
+                   END, \
+                   bt_upload_source_instance = $2, \
+                   bt_upload_live_epoch = CASE \
+                     WHEN bt_upload_source_instance = $2 AND bt_upload_live_epoch > $3 \
+                       THEN bt_upload_live_epoch \
+                     ELSE $3 \
+                   END, \
+                   bt_upload_checkpoint_bytes = CASE \
+                     WHEN bt_upload_source_instance = $2 AND bt_upload_live_epoch > $3 \
+                       THEN bt_upload_checkpoint_bytes \
+                     WHEN bt_upload_source_instance = $2 AND bt_upload_live_epoch = $3 \
+                          AND bt_upload_checkpoint_bytes > $4 \
+                       THEN bt_upload_checkpoint_bytes \
+                     ELSE $4 \
+                   END \
+                 WHERE id = $1 \
+                 RETURNING uploaded_bytes",
+            )
+            .bind(task_id)
+            .bind(source_instance)
+            .bind(live_epoch)
+            .bind(uploaded_bytes)
+            .fetch_optional(&mut *tx)
+            .await?;
             if let Some(total) = total {
-                totals.push((id.clone(), total));
+                totals.push((task_id.clone(), total));
             }
         }
         for (id, secs) in seeding_times {
@@ -6262,30 +6321,74 @@ mod tests {
         close_test_db(&db, dir).await;
     }
 
-    /// 做种 tick 批量落库：上传增量累加到各任务、做种时长整体写入，返回累计值。
+    /// Upload checkpoints accumulate one transaction, and re-sending a sample
+    /// neither double-counts nor rolls the total back.
     #[tokio::test]
-    async fn apply_seeding_tick_accumulates_uploads_and_times_in_one_call() {
+    async fn apply_bt_upload_snapshots_is_idempotent_per_source_and_epoch() {
         let (db, dir) = open_test_db().await;
         insert_task_with_size(&db, "s1", 100).await;
         insert_task_with_size(&db, "s2", 100).await;
-        db.add_task_uploaded_bytes("s1", 50)
-            .await
-            .expect("seed upload");
 
+        let sample = |epoch: u64, bytes: u64| vec![("s1".to_string(), epoch, bytes)];
+
+        // Same source+epoch: the checkpoint advances by the reported growth.
         let totals = db
-            .apply_seeding_tick(
-                &[("s1".to_string(), 25), ("ghost".to_string(), 9)],
-                &[("s1".to_string(), 600), ("s2".to_string(), 30)],
+            .apply_bt_upload_snapshots("run-a", &sample(1, 100), &[])
+            .await
+            .expect("first");
+        assert_eq!(totals, vec![("s1".to_string(), 100)]);
+
+        // A replayed sample is a no-op, not a second increment.
+        let totals = db
+            .apply_bt_upload_snapshots("run-a", &sample(1, 100), &[])
+            .await
+            .expect("replay");
+        assert_eq!(totals, vec![("s1".to_string(), 100)]);
+
+        // Growth within the epoch adds only the delta; seeding time rides along.
+        let totals = db
+            .apply_bt_upload_snapshots(
+                "run-a",
+                &sample(1, 140),
+                &[("s2".to_string(), 30), ("ghost".to_string(), 9)],
             )
             .await
-            .expect("tick");
-
-        // 不存在的任务不产出累计值；已有任务在原累计上叠加。
-        assert_eq!(totals, vec![("s1".to_string(), 75)]);
-        let s1 = db.load_task_by_id("s1").await.expect("load").expect("s1");
+            .expect("growth");
+        assert_eq!(totals, vec![("s1".to_string(), 140)]);
         let s2 = db.load_task_by_id("s2").await.expect("load").expect("s2");
-        assert_eq!((s1.uploaded_bytes, s1.seeding_time_secs), (75, 600));
-        assert_eq!((s2.uploaded_bytes, s2.seeding_time_secs), (0, 30));
+        assert_eq!(s2.seeding_time_secs, 30);
+
+        // A stale sample of the superseded epoch must not roll back or re-add.
+        let totals = db
+            .apply_bt_upload_snapshots("run-a", &sample(1, 120), &[])
+            .await
+            .expect("stale");
+        assert_eq!(totals, vec![("s1".to_string(), 140)]);
+
+        // A fresh live instance carries its own counter: all of its bytes count
+        // even though the raw number is larger than the previous epoch's.
+        let totals = db
+            .apply_bt_upload_snapshots("run-a", &sample(2, 200), &[])
+            .await
+            .expect("new epoch");
+        assert_eq!(totals, vec![("s1".to_string(), 340)]);
+
+        // A new engine run's counter is independent of the first run's epoch.
+        let totals = db
+            .apply_bt_upload_snapshots("run-b", &sample(1, 60), &[])
+            .await
+            .expect("new run");
+        assert_eq!(totals, vec![("s1".to_string(), 400)]);
+
+        let s1 = db.load_task_by_id("s1").await.expect("load").expect("s1");
+        assert_eq!(s1.uploaded_bytes, 400);
+        // A new run's first sample of an epoch whose id matches the stored one
+        // still counts from that run's own counter.
+        let totals = db
+            .apply_bt_upload_snapshots("run-b", &sample(1, 10), &[])
+            .await
+            .expect("same-run older sample");
+        assert_eq!(totals, vec![("s1".to_string(), 400)]);
 
         close_test_db(&db, dir).await;
     }

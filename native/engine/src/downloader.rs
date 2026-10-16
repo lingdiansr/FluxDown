@@ -284,6 +284,18 @@ pub struct FileInfo {
     pub content_encoding_compressed: bool,
 }
 
+/// One observation of a BT upload source.
+///
+/// `live_epoch` identifies the librqbit live instance the counter belongs to
+/// (see `StatsSnapshot::live_epoch`); `uploaded_bytes` is that instance's
+/// counter. Two snapshots with the same epoch are comparable by subtraction;
+/// a different epoch starts a fresh counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BtUploadSnapshot {
+    pub live_epoch: u64,
+    pub uploaded_bytes: u64,
+}
+
 #[derive(Default)]
 pub struct ProgressUpdate {
     pub task_id: String,
@@ -310,7 +322,16 @@ pub struct ProgressUpdate {
     /// task_id 去重），对应 aria2 `onBtDownloadComplete` 通知语义。
     pub bt_data_finished: bool,
     /// 已上传字节数（BT 做种）。仅 BT 任务有意义，默认 0。
+    ///
+    /// 这是 librqbit 的**会话内**计数器，暂停/恢复或会话重建会归零；累计落库
+    /// 必须走 [`Self::bt_upload_snapshot`]，不能直接把这个值当增量基线。
     pub uploaded_bytes: i64,
+    /// BT 上传来源快照（librqbit live 实例 + 该实例已写出的字节数）。
+    ///
+    /// `None` 表示这一帧没有可信的 live 上传来源：非 BT 任务，或暂停期间
+    /// 根本没有 live 状态。**不能**用 `uploaded_bytes = 0` 代替 `None`——
+    /// 那会把「无来源」误当成「计数器归零」而重算增量。
+    pub bt_upload_snapshot: Option<BtUploadSnapshot>,
     /// Seeding status: 0=none, 1=active seeding, 2=ratio reached,
     /// 3=time reached, 4=user stopped, 5=task deleted, 6=session released,
     /// 7=inactive time reached, 8=queued for a seeding slot.

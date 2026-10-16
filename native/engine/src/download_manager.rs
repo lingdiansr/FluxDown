@@ -1901,10 +1901,12 @@ struct TaskSpeedState {
     /// Non-zero only for BT tasks (librqbit stats); latched from every
     /// incoming update so throttled emits carry the freshest value.
     upload_bps: i64,
-    /// Last raw `uploaded_bytes` snapshot from the downloader (librqbit
-    /// session counter). Used to compute deltas for cumulative upload
-    /// accounting across pause/resume and session rebuilds.
-    last_uploaded_snapshot: i64,
+    /// Last upload sample this reporter committed for the task.
+    ///
+    /// Purely a "skip an unchanged sample" cache: it is updated only after the
+    /// database accepted the snapshot, so a failed submit is re-sent instead of
+    /// being dropped, and an identical frame costs no write.
+    committed_upload: Option<crate::downloader::BtUploadSnapshot>,
     /// Cumulative uploaded bytes for BT tasks. Kept in memory so the UI
     /// never shows the librqbit counter reset to zero after pause/resume.
     cumulative_uploaded: i64,
@@ -4558,7 +4560,11 @@ impl DownloadManager {
         if times.is_empty() {
             return;
         }
-        match self.db.apply_seeding_tick(&[], &times).await {
+        match self
+            .db
+            .apply_bt_upload_snapshots(crate::upload_source_instance(), &[], &times)
+            .await
+        {
             Ok(_) => self.mark_seed_times_persisted(),
             Err(e) => log_info!("[manager] shutdown: persist seeding times error: {}", e),
         }
@@ -4591,8 +4597,11 @@ impl DownloadManager {
             }
         };
 
-        // (任务 id, 本轮上传增量, 实时上传速率 B/s)
-        let mut observed: Vec<(String, i64, i64)> = Vec::new();
+        // 每个活动做种者的 live 采样：`observed` 供发帧（上传速率归零/刷新也要发），
+        // `pending` 只装数据库还没有的采样——重复提交同一采样不会改变累计值，跳过
+        // 它才能让空闲做种不写盘（NAS 上休眠的 HDD 不被唤醒）。
+        let mut observed: Vec<(String, crate::downloader::BtUploadSnapshot, i64)> = Vec::new();
+        let mut pending: Vec<(String, crate::downloader::BtUploadSnapshot)> = Vec::new();
         for task_id in &task_ids {
             if !rows.contains_key(task_id) {
                 continue;
@@ -4605,22 +4614,21 @@ impl DownloadManager {
                 // 暂停期间没有 live 快照——不能用 0 覆盖。
                 continue;
             };
-            let snapshot_uploaded = live.snapshot.uploaded_bytes as i64;
-            let upload_speed_bps = (live.upload_speed.mbps * 1024.0 * 1024.0) as i64;
-            let Some(delta) = seeding_mgr
-                .apply_upload_snapshot(task_id, snapshot_uploaded, upload_speed_bps)
-                .await
-            else {
-                continue;
+            let snapshot = crate::downloader::BtUploadSnapshot {
+                live_epoch: live.snapshot.live_epoch,
+                uploaded_bytes: live.snapshot.uploaded_bytes,
             };
-            observed.push((task_id.clone(), delta, upload_speed_bps));
+            let upload_speed_bps = (live.upload_speed.mbps * 1024.0 * 1024.0) as i64;
+            if seeding_mgr
+                .observe_upload(task_id, snapshot, upload_speed_bps)
+                .await
+                .is_some()
+            {
+                pending.push((task_id.clone(), snapshot));
+            }
+            observed.push((task_id.clone(), snapshot, upload_speed_bps));
         }
 
-        let deltas: Vec<(String, i64)> = observed
-            .iter()
-            .filter(|(_, delta, _)| *delta != 0)
-            .map(|(id, delta, _)| (id.clone(), *delta))
-            .collect();
         // 实时累计做种时长取内存值（`SeedingEntry` 里的墙钟累计）：UI 进度事件与
         // 限额求值都读这份，不依赖落库频率；DB 行里的值只是上次落库时的快照。
         let time_snapshot = seeding_mgr.seed_time_snapshot().await;
@@ -4629,31 +4637,47 @@ impl DownloadManager {
                 row.seeding_time_secs = *secs;
             }
         }
-        // 时长只在「本 tick 本来就要写上传增量」或兜底到点时落库；零上传的空闲
-        // 做种既无增量也未到点，`apply_seeding_tick` 对空输入直接返回、不碰 DB。
-        let persist_times = self.seed_times_due(!deltas.is_empty());
+        // 时长只在「本 tick 本来就要写库」或兜底到点时落库；零上传的空闲做种既无
+        // 新采样也未到点，`apply_bt_upload_snapshots` 对空输入直接返回、不碰 DB。
+        let persist_times = self.seed_times_due(!pending.is_empty());
         let times: &[(String, i64)] = if persist_times { &time_snapshot } else { &[] };
-        let persisted = match self.db.apply_seeding_tick(&deltas, times).await {
+        let persisted = match self
+            .db
+            .apply_bt_upload_snapshots(
+                crate::upload_source_instance(),
+                &pending
+                    .iter()
+                    .map(|(id, snap)| (id.clone(), snap.live_epoch, snap.uploaded_bytes))
+                    .collect::<Vec<_>>(),
+                times,
+            )
+            .await
+        {
             Ok(totals) => {
                 if persist_times {
                     self.mark_seed_times_persisted();
                 }
-                for (id, total) in totals {
-                    if let Some(row) = rows.get_mut(&id) {
-                        row.uploaded_bytes = total;
+                let totals: HashMap<String, i64> = totals.into_iter().collect();
+                for (task_id, snapshot) in &pending {
+                    // 提交成功的采样才推进缓存；失败时不推进，下一 tick 重送。
+                    seeding_mgr.mark_upload_committed(task_id, *snapshot).await;
+                    if let Some(total) = totals.get(task_id)
+                        && let Some(row) = rows.get_mut(task_id)
+                    {
+                        row.uploaded_bytes = *total;
                     }
                 }
                 true
             }
             Err(e) => {
-                log_info!("[manager] seeding tick persist error: {}", e);
+                log_info!("[manager] seeding tick persist error: {e:#}");
                 false
             }
         };
 
-        for (task_id, delta, upload_speed_bps) in observed {
-            // 写库失败时，有增量的任务不发事件（累计值未落库，避免 UI 与库分叉）。
-            if delta != 0 && !persisted {
+        for (task_id, _, upload_speed_bps) in observed {
+            // 写库失败时，有待提交采样的任务不发事件（累计值未落库，避免 UI 与库分叉）。
+            if !persisted && pending.iter().any(|(id, _)| id == &task_id) {
                 continue;
             }
             let Some(t) = rows.get(&task_id) else {
@@ -10541,7 +10565,9 @@ impl DownloadManager {
                 task_id,
                 handle,
                 task.uploaded_at_completion,
-                0,
+                // 重新挂载/恢复做种时还没有 live 实例：首个采样带新 epoch，
+                // 由 checkpoint 入口全额计入。
+                None,
                 seed_time_base,
             )
             .await;
@@ -10750,7 +10776,9 @@ impl DownloadManager {
                             &task_id,
                             handle,
                             uploaded_at_completion,
-                            0,
+                            // 从磁盘重新挂载：live 尚未建立，首个采样带新
+                            // epoch，由 checkpoint 入口全额计入。
+                            None,
                             seed_time_base,
                         )
                         .await;
@@ -12464,14 +12492,14 @@ pub async fn progress_reporter(
                 sent_nonzero_speed: false,
                 logged_missing_segments: false,
                 upload_bps: 0,
-                last_uploaded_snapshot: 0,
+                committed_upload: None,
                 cumulative_uploaded: 0,
             }
         });
 
-        // BT upload accounting: a newly created state has no baseline. Seed it
-        // from the persisted DB value so pause/resume cycles (or reporter
-        // restarts) don't briefly flash zero in the UI before the next delta.
+        // BT upload accounting: seed the display value from the persisted total
+        // so a pause/resume cycle (or a reporter restart) doesn't flash zero in
+        // the UI before the next committed sample.
         if state.cumulative_uploaded == 0
             && let Ok(db_total) = db.get_task_uploaded_bytes(&update.task_id).await
         {
@@ -12586,48 +12614,57 @@ pub async fn progress_reporter(
         // -----------------------------------------------------------------
         // BT upload cumulative accounting (download + seeding phases).
         //
-        // librqbit's `stats.live.snapshot.uploaded_bytes` is a per-session
-        // counter that resets to zero whenever the torrent is paused and
-        // resumed (or the whole BT session is rebuilt). To keep the UI's
-        // "uploaded bytes / ratio" correct across these resets, we delta-
-        // accumulate against the DB column `tasks.uploaded_bytes`.
+        // librqbit's `uploaded_bytes` counts within one live instance and
+        // resets to zero whenever that instance is replaced (pause/resume, or
+        // a rebuilt BT session). The source identity is therefore
+        // `(engine run, live instance)`: `apply_bt_upload_snapshots` keeps the
+        // cumulative total and the per-source checkpoint consistent in one
+        // conditional update, so a replayed sample is a no-op and a counter
+        // reset is never mistaken for "no new uploads".
         //
-        // A task is treated as a BT uploader once it has ever reported a
-        // non-zero upload snapshot or upload speed. On the first such
-        // observation (or after a state reset on resume) we load the DB
-        // baseline so we can continue from the previous cumulative value.
+        // A frame without a live snapshot carries no source at all (paused
+        // torrent); it must not be read as a zero counter.
         // -----------------------------------------------------------------
         let mut cumulative_uploaded = update.uploaded_bytes;
-        let is_bt_upload = update.uploaded_bytes > 0
-            || update.upload_speed_bps > 0
-            || state.last_uploaded_snapshot > 0;
-        if is_bt_upload {
-            let snapshot = update.uploaded_bytes;
-            let delta = if snapshot >= state.last_uploaded_snapshot {
-                snapshot - state.last_uploaded_snapshot
-            } else {
-                // Counter reset (pause/resume or session rebuild). Do not
-                // subtract a negative delta; the new session's counter starts
-                // from zero and will be accumulated going forward.
-                0
-            };
-            state.last_uploaded_snapshot = snapshot;
-
-            if delta > 0 {
-                state.cumulative_uploaded =
-                    match db.add_task_uploaded_bytes(&update.task_id, delta).await {
-                        Ok(total) => total,
-                        Err(e) => {
-                            log_info!(
-                                "[progress-reporter] add_task_uploaded_bytes error for {}: {}",
-                                &update.task_id,
-                                e
-                            );
-                            state.cumulative_uploaded.saturating_add(delta)
+        if let Some(snapshot) = update.bt_upload_snapshot {
+            if state.committed_upload != Some(snapshot) {
+                match db
+                    .apply_bt_upload_snapshots(
+                        crate::upload_source_instance(),
+                        &[(
+                            update.task_id.clone(),
+                            snapshot.live_epoch,
+                            snapshot.uploaded_bytes,
+                        )],
+                        &[],
+                    )
+                    .await
+                {
+                    Ok(totals) => {
+                        state.committed_upload = Some(snapshot);
+                        if let Some((_, total)) = totals.first() {
+                            state.cumulative_uploaded = *total;
                         }
-                    };
+                        cumulative_uploaded = state.cumulative_uploaded;
+                    }
+                    Err(e) => {
+                        // Leave the cache untouched: the next frame re-sends
+                        // this same snapshot, and the checkpoint makes the
+                        // retry a no-op instead of a double count.
+                        log_info!(
+                            "[progress-reporter] bt upload checkpoint error for {}: {e:#}",
+                            &update.task_id
+                        );
+                        cumulative_uploaded = state.cumulative_uploaded;
+                    }
+                }
+            } else {
+                cumulative_uploaded = state.cumulative_uploaded;
             }
-
+        } else if update.uploaded_bytes > 0 || update.upload_speed_bps > 0 {
+            // A BT frame without a live snapshot (paused torrent): no source
+            // to account against, so keep the persisted cumulative value
+            // rather than adopting this frame's raw counter.
             cumulative_uploaded = state.cumulative_uploaded;
         }
 

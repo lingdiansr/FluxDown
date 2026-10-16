@@ -286,9 +286,13 @@ pub struct SeedingEntry {
     /// Total uploaded bytes when the download completed and seeding started.
     /// Used to compute the post-completion ratio.
     pub uploaded_at_completion: i64,
-    /// Session-local counter baseline used to accumulate uploads across
-    /// librqbit counter resets (pause/resume or session rebuild).
-    pub last_session_uploaded: i64,
+    /// Last upload sample that the database *committed* for this seeder.
+    ///
+    /// Only used to skip an unchanged sample: reporting the same
+    /// `(live_epoch, uploaded_bytes)` again cannot change the stored total, so
+    /// the tick can avoid writing to disk while a seeder idles (which would
+    /// wake a sleeping NAS disk). A failed submit must NOT advance this.
+    pub last_committed_upload: Option<crate::downloader::BtUploadSnapshot>,
     pub stop_reason: SeedingStopReason,
 }
 
@@ -307,15 +311,15 @@ impl std::fmt::Debug for SeedingEntry {
             .field("last_upload_instant", &self.last_upload_instant)
             .field("last_uploaded_bytes", &self.last_uploaded_bytes)
             .field("uploaded_at_completion", &self.uploaded_at_completion)
-            .field("last_session_uploaded", &self.last_session_uploaded)
+            .field("last_committed_upload", &self.last_committed_upload)
             .field("stop_reason", &self.stop_reason)
             .finish_non_exhaustive()
     }
 }
 
-/// A completed torrent waiting for a free seeding slot. No session upload
-/// baseline is kept: queued torrents are paused, and unpausing always resets
-/// librqbit's per-session upload counter, so activation restarts from 0.
+/// A completed torrent waiting for a free seeding slot. No upload checkpoint
+/// is kept: queued torrents are paused, and unpausing always creates a new
+/// librqbit live instance, whose first sample establishes a fresh counter.
 struct QueuedSeed {
     handle: BtHandle,
     uploaded_at_completion: i64,
@@ -412,7 +416,7 @@ impl SeedingManager {
         task_id: String,
         handle: BtHandle,
         uploaded_at_completion: i64,
-        last_session_uploaded: i64,
+        last_committed_upload: Option<crate::downloader::BtUploadSnapshot>,
         seed_time_base_secs: i64,
     ) -> SeedingRegistration {
         let mut guard = self.state.lock().await;
@@ -435,7 +439,7 @@ impl SeedingManager {
                     last_upload_instant: now,
                     last_uploaded_bytes: uploaded_at_completion,
                     uploaded_at_completion,
-                    last_session_uploaded,
+                    last_committed_upload,
                     stop_reason: SeedingStopReason::None,
                 },
             );
@@ -486,9 +490,10 @@ impl SeedingManager {
                     last_upload_instant: now,
                     last_uploaded_bytes: queued.uploaded_at_completion,
                     uploaded_at_completion: queued.uploaded_at_completion,
-                    // Paused-then-unpaused torrents restart librqbit's upload
-                    // counter from zero — so does the delta baseline.
-                    last_session_uploaded: 0,
+                    // Paused-then-unpaused torrents get a fresh librqbit live
+                    // instance, so nothing was committed for it yet; its first
+                    // sample carries a new epoch and counts in full.
+                    last_committed_upload: None,
                     stop_reason: SeedingStopReason::None,
                 },
             );
@@ -536,45 +541,58 @@ impl SeedingManager {
         (activated, demoted)
     }
 
-    /// Apply a fresh live-upload snapshot and return the delta that should be
-    /// added to the persisted `uploaded_bytes` counter.
+    /// Record a live upload observation for an active seeder.
     ///
-    /// Returns `None` when `snapshot_uploaded` is negative (should not happen)
-    /// or the seeder is not actively seeding. The caller should skip DB writes
-    /// when this returns `None`.
-    ///
-    /// librqbit resets its internal upload counter when a torrent is paused
-    /// or when the session is rebuilt, so this method detects counter
-    /// regression and resets the baseline to avoid negative deltas.
-    pub async fn apply_upload_snapshot(
+    /// Returns the snapshot that still needs committing, or `None` when the
+    /// database already holds it (reporting it again cannot change the stored
+    /// total). Any real upload activity refreshes the inactivity timer.
+    pub async fn observe_upload(
         &self,
         task_id: &str,
-        snapshot_uploaded: i64,
+        snapshot: crate::downloader::BtUploadSnapshot,
         upload_speed_bps: i64,
-    ) -> Option<i64> {
-        if snapshot_uploaded < 0 {
-            return None;
-        }
+    ) -> Option<crate::downloader::BtUploadSnapshot> {
         let mut guard = self.state.lock().await;
         let entry = guard.active.get_mut(task_id)?;
-
-        // Counter reset (pause/resume or new session): start a new baseline.
-        if snapshot_uploaded < entry.last_session_uploaded {
-            entry.last_session_uploaded = 0;
-        }
-        let delta = snapshot_uploaded - entry.last_session_uploaded;
-        if delta >= 0 {
-            entry.last_session_uploaded = snapshot_uploaded;
-        }
-
-        // `last_uploaded_bytes` 只保存 DB 累计尺度，由 `evaluate_limits`
-        // 独占写入；这里的入参是会话计数器（尺度更小），据它检测到的上传
-        // 活动只刷新不活跃计时器，或直接依据正的增量。
-        if upload_speed_bps > 0 || delta > 0 {
+        let progressed = match entry.last_committed_upload {
+            // Same live instance: only a strictly larger counter is new data.
+            Some(prev) if prev.live_epoch == snapshot.live_epoch => {
+                snapshot.uploaded_bytes > prev.uploaded_bytes
+            }
+            // No committed sample yet, or a different live instance: the
+            // counter restarted, so this observation is new data in full.
+            _ => true,
+        };
+        if upload_speed_bps > 0 || progressed {
             entry.last_upload_instant = Instant::now();
         }
+        progressed.then_some(snapshot)
+    }
 
-        Some(delta)
+    /// Mark `snapshot` as committed for an active seeder.
+    ///
+    /// Must be called only after the database accepted it: a failed submit
+    /// leaves the cache untouched so the next tick re-sends the same snapshot.
+    pub async fn mark_upload_committed(
+        &self,
+        task_id: &str,
+        snapshot: crate::downloader::BtUploadSnapshot,
+    ) {
+        let mut guard = self.state.lock().await;
+        if let Some(entry) = guard.active.get_mut(task_id) {
+            // Never move the cache backwards: a replayed older sample must not
+            // make a newer committed one look uncommitted.
+            let keep_newer = match entry.last_committed_upload {
+                Some(prev) if prev.live_epoch == snapshot.live_epoch => {
+                    prev.uploaded_bytes > snapshot.uploaded_bytes
+                }
+                Some(prev) => prev.live_epoch > snapshot.live_epoch,
+                None => false,
+            };
+            if !keep_newer {
+                entry.last_committed_upload = Some(snapshot);
+            }
+        }
     }
 
     /// Remove a seeding entry (active or queued) and report its final

@@ -177,6 +177,20 @@ pub enum EngineError {
 /// # Ok(())
 /// # }
 /// ```
+/// Identity of this engine run for BT upload accounting.
+///
+/// librqbit's per-live `uploaded_bytes` counter is scoped to one live instance
+/// (`StatsSnapshot::live_epoch`), and its epoch counter restarts from scratch
+/// in a new process. An engine run therefore needs its own identity so that a
+/// second run's counter (which legitimately starts at zero) is never mistaken
+/// for a counter regression of the first run's data. One id per process is
+/// enough: an engine run holds the exclusive writer lease for its data
+/// directory, so two runs in one process still write disjoint databases.
+pub fn upload_source_instance() -> &'static str {
+    static SOURCE_INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOURCE_INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
 pub struct Engine {
     /// 数据库句柄。`DownloadManager` 内部持有自己的 clone;此处额外持有
     /// 一份供宿主直接做 config/task 查询(如 `RequestConfig`/`SaveConfig`),
