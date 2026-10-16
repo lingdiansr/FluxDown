@@ -598,49 +598,6 @@ fn task_target_path(save_dir: &str, file_name: &str) -> Option<PathBuf> {
     Some(PathBuf::from(save_dir).join(file_name))
 }
 
-/// BT 启动清理：目录中是否仍有任一非空文件。无法确定内容时保守视为有数据，
-/// 防止临时权限/设备错误被误当成空目录而删除可恢复的下载数据。
-async fn directory_has_real_data(path: &Path) -> bool {
-    let mut entries = match tokio::fs::read_dir(path).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(error) => {
-            crate::logger::report_warning(
-                "download-manager",
-                "inspect startup staging directory",
-                &error,
-            );
-            return true;
-        }
-    };
-    loop {
-        match entries.next_entry().await {
-            Ok(Some(entry)) => match entry.metadata().await {
-                Ok(metadata) if metadata.len() > 0 => return true,
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    crate::logger::report_warning(
-                        "download-manager",
-                        "inspect startup staging entry",
-                        &error,
-                    );
-                    return true;
-                }
-            },
-            Ok(None) => return false,
-            Err(error) => {
-                crate::logger::report_warning(
-                    "download-manager",
-                    "enumerate startup staging contents",
-                    &error,
-                );
-                return true;
-            }
-        }
-    }
-}
-
 /// 文件跟踪：探测单个路径是否已丢失。`Some(true)`=确证不存在、`Some(false)`=
 /// 存在、`None`=不可判定（I/O 错误 / 超时 / 权限）。调用方对 `None` 保持原
 /// 标志不变，避免把「临时不可访问」误判为「已删除」（防误报）；掉盘等瞬时
@@ -6302,17 +6259,41 @@ impl DownloadManager {
 
                         match task_map.get(task_id_str) {
                             None => {
-                                // Case C: orphan — no matching task in DB.
-                                log_info!(
-                                    "[manager] startup cleanup: removing orphan staging dir {}",
-                                    path.display()
-                                );
-                                if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+                                // Case C: orphan — no matching task in DB.  A
+                                // directory holding real data is never removed:
+                                // it can be a user's payload whose DB row was
+                                // lost, or residue of an interrupted migration.
+                                // Only a confirmed-empty directory is cleaned.
+                                if bt_downloader::stage_dir_has_real_data_async(path.clone()).await
+                                {
                                     log_info!(
-                                        "[manager] startup cleanup: failed to remove orphan staging dir {}: {}",
-                                        path.display(),
-                                        e
+                                        "[manager] startup cleanup: {} {}",
+                                        bt_downloader::payload_decision(
+                                            "startup",
+                                            "keep",
+                                            "orphan with real data"
+                                        ),
+                                        path.display()
                                     );
+                                } else {
+                                    log_info!(
+                                        "[manager] startup cleanup: {} {}",
+                                        bt_downloader::payload_decision(
+                                            "startup",
+                                            "remove",
+                                            "orphan confirmed empty"
+                                        ),
+                                        path.display()
+                                    );
+                                    if let Err(e) = tokio::fs::remove_dir_all(&path).await
+                                        && e.kind() != std::io::ErrorKind::NotFound
+                                    {
+                                        log_info!(
+                                            "[manager] startup cleanup: failed to remove orphan staging dir {}: {}",
+                                            path.display(),
+                                            e
+                                        );
+                                    }
                                 }
                             }
                             Some((3 /* STATUS_COMPLETED */, _, _, _)) => {
@@ -6322,17 +6303,30 @@ impl DownloadManager {
                                 // 部分移动失败(权限/跨盘/IO)而保留了仍含真实数据的目录,
                                 // 这里必须同样用 has_real_data 守卫保留,否则无条件
                                 // remove_dir_all 会把这些文件永久删除(与 Case B 一致)。
-                                if directory_has_real_data(&path).await {
+                                if bt_downloader::stage_dir_has_real_data_async(path.clone()).await
+                                {
                                     log_info!(
-                                        "[manager] startup cleanup: keeping completed-task staging dir {} (still has real data; rescue likely partially failed)",
+                                        "[manager] startup cleanup: {} {}",
+                                        bt_downloader::payload_decision(
+                                            "startup",
+                                            "keep",
+                                            "completed-task staging still has real data"
+                                        ),
                                         path.display()
                                     );
                                 } else {
                                     log_info!(
-                                        "[manager] startup cleanup: removing completed-task staging dir {}",
+                                        "[manager] startup cleanup: {} {}",
+                                        bt_downloader::payload_decision(
+                                            "startup",
+                                            "remove",
+                                            "completed-task staging is empty"
+                                        ),
                                         path.display()
                                     );
-                                    if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+                                    if let Err(e) = tokio::fs::remove_dir_all(&path).await
+                                        && e.kind() != std::io::ErrorKind::NotFound
+                                    {
                                         log_info!(
                                             "[manager] startup cleanup: failed to remove completed staging dir {}: {}",
                                             path.display(),
@@ -6348,17 +6342,30 @@ impl DownloadManager {
                                 // the task was paused/cancelled before any real data was
                                 // written (e.g. the same torrent was re-added, creating a
                                 // new task_id and new staging dir, making this one stale).
-                                if directory_has_real_data(&path).await {
+                                if bt_downloader::stage_dir_has_real_data_async(path.clone()).await
+                                {
                                     log_info!(
-                                        "[manager] startup cleanup: keeping staging dir {} (task active/paused, has data)",
+                                        "[manager] startup cleanup: {} {}",
+                                        bt_downloader::payload_decision(
+                                            "startup",
+                                            "keep",
+                                            "active/paused task staging has real data"
+                                        ),
                                         path.display()
                                     );
                                 } else {
                                     log_info!(
-                                        "[manager] startup cleanup: removing empty staging dir {} (task active/paused but no real data)",
+                                        "[manager] startup cleanup: {} {}",
+                                        bt_downloader::payload_decision(
+                                            "empty-stage",
+                                            "remove",
+                                            "active/paused task staging is empty"
+                                        ),
                                         path.display()
                                     );
-                                    if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+                                    if let Err(e) = tokio::fs::remove_dir_all(&path).await
+                                        && e.kind() != std::io::ErrorKind::NotFound
+                                    {
                                         log_info!(
                                             "[manager] startup cleanup: failed to remove empty staging dir {}: {}",
                                             path.display(),
@@ -9696,6 +9703,16 @@ impl DownloadManager {
                 // file_name 可能撞上早前同名任务的成品目录/文件。
                 if delete_files && owns_final && is_safe_file_name(&t.file_name) {
                     if path.is_dir() {
+                        log_info!(
+                            "[manager] delete_task {}: {} {}",
+                            task_id,
+                            bt_downloader::payload_decision(
+                                "explicit-delete",
+                                "remove",
+                                "user deleted the task and its files"
+                            ),
+                            path.display()
+                        );
                         if let Err(error) = tokio::fs::remove_dir_all(&path).await
                             && error.kind() != std::io::ErrorKind::NotFound
                         {
@@ -9732,8 +9749,13 @@ impl DownloadManager {
                 let stage_dir = bt_downloader::bt_stage_dir(&t.save_dir, task_id);
                 if stage_dir.exists() {
                     log_info!(
-                        "[manager] delete_task {}: removing staging dir {}",
+                        "[manager] delete_task {}: {} {}",
                         task_id,
+                        bt_downloader::payload_decision(
+                            "explicit-delete",
+                            "remove",
+                            "task-scoped staging removed with the task"
+                        ),
                         stage_dir.display()
                     );
                     if let Err(error) = tokio::fs::remove_dir_all(&stage_dir).await
@@ -14541,6 +14563,51 @@ mod tests {
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "outer failure must not emit a competing terminal frame"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_keeps_orphan_staging_with_real_data() {
+        let (dir, db, injector) = sqlite_fault_fixture("orphan_real_data").await;
+        let save_dir = dir.join("downloads");
+        std::fs::create_dir_all(&save_dir).expect("create save dir");
+
+        // An orphan staging dir (no matching DB task) that still holds a
+        // nested, non-empty payload — e.g. a user's data whose task row was
+        // lost.  It must survive startup cleanup untouched.
+        let orphan = bt_downloader::bt_stage_dir(&save_dir.to_string_lossy(), "orphan-task");
+        std::fs::create_dir_all(orphan.join("nested")).expect("create orphan nested dir");
+        std::fs::write(orphan.join("nested").join("data.bin"), b"real payload")
+            .expect("write orphan payload");
+
+        // An orphan staging dir that is genuinely empty may be cleaned up.
+        let empty = bt_downloader::bt_stage_dir(&save_dir.to_string_lossy(), "empty-task");
+        std::fs::create_dir_all(&empty).expect("create empty orphan dir");
+
+        let sink = Arc::new(RecordingSink::new());
+        let mut manager = sched_manager_with_sink(&db, 1, sink);
+        manager.set_default_save_dir(save_dir.to_string_lossy().into_owned());
+        manager.load_and_send_all_tasks().await;
+
+        assert!(
+            orphan.join("nested").join("data.bin").exists(),
+            "orphan staging with real payload must not be deleted: {}",
+            orphan.display()
+        );
+        assert!(
+            !empty.exists(),
+            "confirmed-empty orphan staging should be cleaned: {}",
+            empty.display()
+        );
+
+        drop(manager);
+        injector.close().await;
+        drop(db);
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            // Windows 上 DB 句柄可能仍持有目录；清理不改变行为断言结果。
+            crate::logger::report_warning("download-manager-test", "remove test directory", &error);
+        }
     }
 
     #[tokio::test]

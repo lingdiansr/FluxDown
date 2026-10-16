@@ -989,19 +989,52 @@ impl SharedBtSession {
     ///
     /// The `{hash}.torrent` metadata cache is intentionally kept — it is
     /// content-addressed and always valid.
-    pub fn clear_stale_fastresume(&self, info_hash_hex: &str) {
+    pub fn clear_stale_fastresume(&self, info_hash_hex: &str, task_id: &str) {
         let path = self.bitv_path(info_hash_hex);
         match std::fs::remove_file(&path) {
             Ok(()) => log_info!(
-                "[BT] removed stale fastresume bitfield {} (staging has no data)",
-                path.display()
+                "[BT] {} {} task={}",
+                payload_decision("empty-stage", "clear-bitv", "staging has no data"),
+                path.display(),
+                short_id(task_id)
             ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => log_info!(
-                "[BT] failed to remove stale fastresume {}: {} — completion verification will catch any phantom pieces",
+                "[BT] {} {} task={} error={} — completion verification will catch any phantom pieces",
+                payload_decision("empty-stage", "failed", "could not remove stale bitfield"),
                 path.display(),
+                short_id(task_id),
                 e
             ),
+        }
+    }
+
+    /// If some **other** task currently owns a live/cached handle for
+    /// `info_hash_hex` in this session, return that task id.
+    ///
+    /// Used to keep the stale-bitfield guard from touching state another
+    /// task is actively using: that task's payload may be perfectly valid and
+    /// its have-bits in play, so clearing the bitfield here (or reusing its
+    /// staging directory) would corrupt a healthy download.  Ownership is
+    /// resolved through the torrent-id mapping, so an entry whose owner is
+    /// unknown is still reported as a foreign owner rather than silently
+    /// ignored.
+    pub async fn other_owner_of_hash(&self, info_hash_hex: &str, task_id: &str) -> Option<String> {
+        let torrent_id = self.session.with_torrents(|iter| {
+            let mut found = None;
+            for (tid, torrent) in iter {
+                if torrent.info_hash().as_string() == info_hash_hex {
+                    found = Some(tid);
+                    break;
+                }
+            }
+            found
+        })?;
+        match self.task_for_torrent(torrent_id).await {
+            Some(owner) if owner != task_id => Some(owner),
+            // Owned by this task, or owned by nobody we can name: the caller
+            // keeps its normal "empty staging ⇒ clear" behaviour.
+            _ => None,
         }
     }
 
@@ -1838,6 +1871,20 @@ fn landed_residue_path(
     None
 }
 
+/// One-line, credential-free record of a payload/bitmap lifecycle decision.
+///
+/// Emitted at every point that either destroys real payload or clears a
+/// fast-resume bitfield, so a future "my file went to zero bytes" report can
+/// be attributed to a specific phase without a full-disk scan, and without
+/// printing tracker credentials or full download URLs (see the plan's
+/// "决策日志" item).
+///
+/// `phase` is one of `startup` / `empty-stage` / `explicit-delete` /
+/// `completion`; `action` is `keep` / `remove` / `clear-bitv` / `failed`.
+pub fn payload_decision(phase: &str, action: &str, reason: &str) -> String {
+    format!("payload-decision phase={phase} action={action} reason={reason}")
+}
+
 /// Returns `true` if `dir` contains at least one regular file with `len > 0`,
 /// searching **recursively** (multi-file torrents nest their payload inside a
 /// `<torrent name>/` subdirectory, which a top-level-only scan reports as a
@@ -1872,6 +1919,26 @@ pub fn stage_dir_has_real_data(dir: &Path) -> bool {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => true,
         Ok(_) => scan(dir, 0).unwrap_or(true),
+    }
+}
+
+/// [`stage_dir_has_real_data`] off the async runtime's worker thread.
+///
+/// The underlying walk is synchronous and can stall on a slow or spun-down
+/// disk; startup cleanup and other async callers must not block the executor
+/// on it.  There is deliberately only one implementation of the "does this
+/// directory hold real payload" question — a second, subtly different one
+/// (top-level-only) answered `false` for a multi-file torrent on Windows and
+/// authorised deleting a live payload.
+pub async fn stage_dir_has_real_data_async(dir: PathBuf) -> bool {
+    match tokio::task::spawn_blocking(move || stage_dir_has_real_data(&dir)).await {
+        Ok(has_data) => has_data,
+        Err(error) => {
+            // A panicked or cancelled probe cannot prove the directory is
+            // empty, so fall back to the only safe answer.
+            log_info!("[BT] stage dir probe join failed: {error}");
+            true
+        }
     }
 }
 
@@ -3908,10 +3975,19 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // see `clear_stale_fastresume`) and never re-download those
             // pieces, producing a "finished" file with zero-filled holes.
             // Delete the bitfield up front so the re-add does a genuine
-            // initial check.  同 hash 活在会话里的情形已在上方拒绝/放行，
-            // 走到这里 `.bitv` 若存在必是陈旧残留。
+            // initial check.  同 hash 活在**其他**任务手里时不动它：对方的
+            // payload 与 have-bits 正在用，清位图/复用目录会破坏健康任务，
+            // 重复任务由上方 —— 或 add 返回 AlreadyManaged —— 处理。
             if !stage_dir_has_real_data(&stage_dir) {
-                shared_bt.clear_stale_fastresume(&hash);
+                match shared_bt.other_owner_of_hash(&hash, &task_id).await {
+                    Some(owner) => log_info!(
+                        "[BT] task={} {} info_hash={}",
+                        short_id(&task_id),
+                        payload_decision("empty-stage", "keep", "another task owns this info hash"),
+                        short_id(&owner)
+                    ),
+                    None => shared_bt.clear_stale_fastresume(&hash, &task_id),
+                }
             }
             // 走到这里 `.bitv` 仍存在 ⇒ 本次 add 的 have-bits 可能经采样式
             // fastresume 校验恢复（对哈希不匹配宽容）——完成期保留全量
@@ -5644,6 +5720,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // lets the user (or `rescue_stranded_staging_files` on next start)
             // recover the data manually.
             if all_moves_succeeded && stage_dir_for_cleanup.exists() {
+                log_info!(
+                    "[BT] task={} {} {}",
+                    short_id(&task_id),
+                    payload_decision("completion", "remove", "all files moved out of staging"),
+                    stage_dir_for_cleanup.display()
+                );
                 let mut removed = false;
                 for attempt in 0u8..4 {
                     if attempt > 0 {
@@ -6551,6 +6633,87 @@ mod tests {
     fn magnet_display_name_literal_utf8() {
         let name = super::magnet_display_name("magnet:?xt=urn:btih:abc&dn=中文电影");
         assert_eq!(name.as_deref(), Some("中文电影"));
+    }
+
+    #[test]
+    fn other_owner_of_hash_detects_foreign_and_absent_owners() {
+        let port = {
+            let l = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("ephemeral port");
+            l.local_addr().expect("addr").port()
+        };
+        let work = unique_test_dir("owner_guard");
+        std::fs::create_dir_all(&work).expect("test dir");
+        let work_string = work.to_string_lossy().into_owned();
+        let config = super::BtConfig {
+            enable_dht: false,
+            enable_upnp: false,
+            port_start: port.max(1024),
+            port_end: port.max(1024).saturating_add(8),
+            ..Default::default()
+        };
+
+        // Build a real torrent from a local payload (no network involved; the
+        // torrent is added paused and never fetched).
+        let content = work.join("content");
+        std::fs::create_dir_all(&content).expect("content dir");
+        std::fs::write(content.join("a.bin"), vec![0x5Au8; 64 * 1024]).expect("write payload");
+        // `SharedBtSession::new` internally `block_on`s its own runtime, so
+        // it must be created from a synchronous test (the crate's convention).
+        let bt = super::SharedBtSession::new(&work_string, &work_string, 0, 0, &config)
+            .expect("BT session");
+        let session = bt.session.clone();
+
+        bt.runtime.block_on(async {
+            let torrent = librqbit::create_torrent(
+                &content,
+                librqbit::CreateTorrentOptions {
+                    piece_length: Some(32 * 1024),
+                    ..Default::default()
+                },
+                &librqbit::spawn_utils::BlockingSpawner::new(1),
+            )
+            .await
+            .expect("create torrent");
+            let torrent_bytes = torrent.as_bytes().expect("torrent bytes");
+            let hash = torrent.info_hash().as_string();
+            let out = work.join("out");
+            std::fs::create_dir_all(&out).expect("out dir");
+
+            // Empty session: nobody owns the hash.
+            assert_eq!(bt.other_owner_of_hash(&hash, "me").await, None);
+
+            let handle = session
+                .add_torrent(
+                    librqbit::AddTorrent::from_bytes(torrent_bytes),
+                    Some(librqbit::AddTorrentOptions {
+                        paused: true,
+                        overwrite: true,
+                        output_folder: Some(out.to_string_lossy().into_owned()),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .expect("add torrent")
+                .into_handle()
+                .expect("handle");
+            let torrent_id = handle.id();
+            bt.store_handle("owner-task", handle.clone()).await;
+            bt.register_torrent_id(torrent_id, "owner-task").await;
+
+            // Another task must see the foreign owner; the owner itself must not.
+            assert_eq!(
+                bt.other_owner_of_hash(&hash, "other-task").await.as_deref(),
+                Some("owner-task")
+            );
+            assert_eq!(bt.other_owner_of_hash(&hash, "owner-task").await, None);
+        });
+
+        drop(bt);
+        if let Err(error) = std::fs::remove_dir_all(work)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
+        }
     }
 
     #[test]
