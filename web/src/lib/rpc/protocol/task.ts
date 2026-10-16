@@ -122,6 +122,20 @@ export interface BtPeerStatsDto {
   downloadedPieces?: number | null;
   totalPieceDownloadMs?: number | null;
   peerSteals?: number | null;
+  /** Payload bytes this peer set took from us in the current live instance. */
+  uploadedBytes?: number | null;
+  /** Live peers that took payload from us within the recent-activity window. */
+  uploadingPeers?: number | null;
+  /** Peers that have signalled `Interested` (real demand for our data). */
+  interestedPeers?: number | null;
+  /** Accepted, valid upload requests, cumulative for the live instance. */
+  uploadRequests?: number | null;
+  /** Upload requests enqueued but not yet handed to the writer. */
+  uploadQueueDepth?: number | null;
+  /** Inbound connections refused before the BT handshake (session-scoped). */
+  incomingRejected?: number | null;
+  /** Connections refused by the session admission budgets (session-scoped). */
+  admissionRejected?: number | null;
 }
 
 /** 任务最新传输采样；活跃传输数不是 socket 数、配置上限或分段数。 */

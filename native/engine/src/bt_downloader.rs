@@ -3104,6 +3104,16 @@ fn bt_peer_stats_from_handle(handle: &BtHandle) -> Option<crate::transfer_activi
         downloaded_pieces: Some(snapshot.downloaded_and_checked_pieces),
         total_piece_download_ms: Some(snapshot.total_piece_download_ms),
         peer_steals: Some(peer_stats.steals),
+        // Upload-side counters come from the same aggregate snapshot, so a
+        // reader never has to walk per-peer state to learn whether anyone is
+        // actually taking data from us.
+        uploaded_bytes: Some(snapshot.uploaded_bytes),
+        uploading_peers: Some(snapshot.uploading_peers),
+        interested_peers: Some(peer_stats.interested_peers),
+        upload_requests: Some(snapshot.upload_requests),
+        upload_queue_depth: Some(snapshot.upload_queue_depth),
+        incoming_rejected: Some(peer_stats.incoming_rejected),
+        admission_rejected: Some(peer_stats.admission_rejected),
     })
 }
 fn bt_runtime(

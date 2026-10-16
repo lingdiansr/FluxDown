@@ -51,6 +51,20 @@ pub struct BtPeerStats {
     pub downloaded_pieces: Option<u64>,
     pub total_piece_download_ms: Option<u64>,
     pub peer_steals: Option<u32>,
+    /// Payload bytes this peer set took from us in the current live instance.
+    pub uploaded_bytes: Option<u64>,
+    /// Live peers that took payload from us within the recent-activity window.
+    pub uploading_peers: Option<u32>,
+    /// Peers that have signalled `Interested` (real demand for our data).
+    pub interested_peers: Option<u32>,
+    /// Accepted, valid upload requests, cumulative for the live instance.
+    pub upload_requests: Option<u64>,
+    /// Upload requests enqueued but not yet handed to the writer.
+    pub upload_queue_depth: Option<u32>,
+    /// Inbound connections refused before the BT handshake (session-scoped).
+    pub incoming_rejected: Option<u32>,
+    /// Connections refused by the session admission budgets (session-scoped).
+    pub admission_rejected: Option<u32>,
 }
 
 /// A sampled task runtime, independent from the daemon wire DTO.

@@ -152,6 +152,13 @@ fn runtime_dto_carries_bt_peer_lifecycle_and_quality_stats() -> Result<(), serde
             downloaded_pieces: Some(12),
             total_piece_download_ms: Some(13_000),
             peer_steals: Some(2),
+            uploaded_bytes: Some(21_000),
+            uploading_peers: Some(5),
+            interested_peers: Some(9),
+            upload_requests: Some(44),
+            upload_queue_depth: Some(6),
+            incoming_rejected: Some(17),
+            admission_rejected: Some(18),
         }),
         ..TaskRuntime::default()
     });
@@ -177,11 +184,18 @@ fn runtime_dto_carries_bt_peer_lifecycle_and_quality_stats() -> Result<(), serde
             downloaded_pieces: Some(12),
             total_piece_download_ms: Some(13_000),
             peer_steals: Some(2),
+            uploaded_bytes: Some(21_000),
+            uploading_peers: Some(5),
+            interested_peers: Some(9),
+            upload_requests: Some(44),
+            upload_queue_depth: Some(6),
+            incoming_rejected: Some(17),
+            admission_rejected: Some(18),
         })
     );
     assert_eq!(
         serde_json::to_string(&dto)?,
-        r#"{"taskId":"","sampledAtMs":0,"sampleSequence":0,"activeTransfers":null,"connectedPeers":7,"btPeerStats":{"seen":31,"queued":4,"connecting":6,"live":7,"dead":14,"usefulPeers":3,"liveTcp":4,"liveUtp":2,"liveSocks":1,"connectionAttempts":11,"connectionSuccesses":8,"connectionErrors":3,"totalConnectingMs":9000,"fetchedBytes":10000,"downloadedPieces":12,"totalPieceDownloadMs":13000,"peerSteals":2},"parallelismLimit":null,"totalBytes":0,"segments":[],"sourceBytes":null}"#
+        r#"{"taskId":"","sampledAtMs":0,"sampleSequence":0,"activeTransfers":null,"connectedPeers":7,"btPeerStats":{"seen":31,"queued":4,"connecting":6,"live":7,"dead":14,"usefulPeers":3,"liveTcp":4,"liveUtp":2,"liveSocks":1,"connectionAttempts":11,"connectionSuccesses":8,"connectionErrors":3,"totalConnectingMs":9000,"fetchedBytes":10000,"downloadedPieces":12,"totalPieceDownloadMs":13000,"peerSteals":2,"uploadedBytes":21000,"uploadingPeers":5,"interestedPeers":9,"uploadRequests":44,"uploadQueueDepth":6,"incomingRejected":17,"admissionRejected":18},"parallelismLimit":null,"totalBytes":0,"segments":[],"sourceBytes":null}"#
     );
     Ok(())
 }

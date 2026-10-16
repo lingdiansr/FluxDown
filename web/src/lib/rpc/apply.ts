@@ -102,6 +102,13 @@ function clearedRuntime(runtime: TaskRuntimeDto): TaskRuntimeDto {
             downloadedPieces: null,
             totalPieceDownloadMs: null,
             peerSteals: null,
+            uploadedBytes: null,
+            uploadingPeers: null,
+            interestedPeers: null,
+            uploadRequests: null,
+            uploadQueueDepth: null,
+            incomingRejected: null,
+            admissionRejected: null,
           },
     segments: runtime.segments.map((segment) => ({ ...segment, active: false })),
   }

@@ -53,6 +53,20 @@ pub struct BtPeerStatsDto {
     pub total_piece_download_ms: Option<u64>,
     #[serde(default)]
     pub peer_steals: Option<u32>,
+    #[serde(default)]
+    pub uploaded_bytes: Option<u64>,
+    #[serde(default)]
+    pub uploading_peers: Option<u32>,
+    #[serde(default)]
+    pub interested_peers: Option<u32>,
+    #[serde(default)]
+    pub upload_requests: Option<u64>,
+    #[serde(default)]
+    pub upload_queue_depth: Option<u32>,
+    #[serde(default)]
+    pub incoming_rejected: Option<u32>,
+    #[serde(default)]
+    pub admission_rejected: Option<u32>,
 }
 
 /// 任务按加速来源累计的已写入字节：跨运行累加，重下 / 清盘时随进度一并复位。
