@@ -201,9 +201,9 @@
 | 4 恢复与损坏位图 | ✅ 已有 `test_fastresume_rejects_phantom_have_piece` 实跑通过；嵌套多文件 / Windows sparse 未覆盖 |
 | 5 发现有界性 | ✅ 注入 30000 候选的规模压测：池不超上限、最老被淘汰、live 不被牺牲、新 peer 仍可入 |
 | 6 tracker 调度 | ✅ 20 个真实本地 HTTP tracker（服务端各自记录并发）+ 默认预算 8：全部收到 announce、实测峰值 ≤ 8 |
-| 7 DHT 双栈失败归因 | ◐ 计数已实现 + `bootstrap_failures_are_attributed_to_dns_and_families` 单测；未做真实 UDP 双栈端到端 |
-| 1 多 torrent round-robin 真实入站 | ◐ 单测覆盖公平轮转 / 拒绝不丢；未做多 torrent 真实 loopback 拓扑 |
+| 7 DHT 双栈失败归因 | ✅ 已补：`bootstrap_succeeds_when_one_address_family_works` 用真实本地 UDP 节点 + 双族解析的主机名（仅 v4 有监听）端到端跑通：单族可达即计成功，且断言 v6 失败计数确实增长（否则两族都成功也会通过）。仍无公网双栈失败诊断 |
+| 1 多 torrent round-robin 真实入站 | ✅ 已补：`multi_torrent_shares_the_session_budget_without_starving_any_torrent`——5 个 torrent 对同一做种 session 真实 loopback 下载，共享一个不足以同时容纳全部 torrent 的 session 预算；断言同时 live 的 torrent 数 `< 5`（预算未被争用时测试即失败）、每个 torrent 都拿到 peer、session 逻辑 peer 峰值不超预算。真实入站握手（出站饱和时被入站建立）仍未覆盖 |
 
-验证面：rqbit `--lib` 89 通过；FD `fluxdown_engine --lib` 1256 通过、`fluxdown_protocol` / `fluxdown_daemon` / `fluxdown_api` / `fluxdown_mobile` 通过；Web `bun test` 268 通过、`bun run build` 通过；`cargo clippy --workspace --exclude fluxdown_server --all-targets -D warnings` 通过；release.yml 的 librqbit 校验逻辑本地复跑通过。
+验证面：rqbit `--lib` 95 通过（含本轮新增 `multi_torrent_budget`）、`librqbit-dht` 30 通过；FD `fluxdown_engine --lib` 1256 通过、`fluxdown_protocol` / `fluxdown_daemon` / `fluxdown_api` / `fluxdown_mobile` 通过；Web `bun test` 268 通过、`bun run build` 通过；`cargo clippy --workspace --exclude fluxdown_server --all-targets -D warnings` 通过；release.yml 的 librqbit 校验逻辑本地复跑通过。
 
 未覆盖面：Android（本机无 Android SDK）与 iOS（非 macOS）未做编译/运行验证，仅静态核对目录项、设置行、i18n 键与「不进同步目录」；PG 未跑（无隔离实例），checkpoint 的事务/幂等语义由 SQLite 用例覆盖，SQL 文本两后端共用同一份条件 UPDATE。
