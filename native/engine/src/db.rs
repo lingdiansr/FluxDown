@@ -2839,7 +2839,13 @@ impl Db {
             ("bt_port_start", "6881"),
             ("bt_port_end", "6891"),
             // Per-torrent peer admission limit; 128..512, default 256.
+            // Live (established) peers only: half-open dials are budgeted by
+            // `bt_peer_connect_limit` below.
             ("bt_peer_limit", "256"),
+            // Outbound connecting peers per torrent; 32..256, default 64.
+            ("bt_peer_connect_limit", "64"),
+            // Session-wide logical peer budget; 128..4096, default 1024.
+            ("bt_session_peer_limit", "1024"),
             // MSE 三态逃生开关（disabled/enabled/forced），无 UI，经 config API/CLI 可设。
             ("bt_mse_mode", "enabled"),
             // Tracker 订阅：默认启用，订阅社区流行的两个精选列表
