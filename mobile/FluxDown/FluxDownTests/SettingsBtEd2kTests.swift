@@ -60,7 +60,7 @@ struct SettingsBtEd2kTests {
         #expect(BtSettingsRow.allCases.allSatisfy { !$0.isVisible(in: unloaded) })
         #expect(Ed2kSettingsRow.allCases.allSatisfy { !$0.isVisible(in: unloaded) })
         let loaded = form(["bt_enable_dht": "true"])
-        #expect(BtSettingsRow.visible(in: .general, loaded).count == 7)
+        #expect(BtSettingsRow.visible(in: .general, loaded).count == 9)
         #expect(Ed2kSettingsRow.visible(in: .servers, loaded).count == 4)
     }
 
@@ -85,6 +85,25 @@ struct SettingsBtEd2kTests {
         #expect(BtSettingsRow.seedTimeLimit.item.isSynced)
         #expect(SettingsCatalog.field("bt_seed_time_limit_unit") != nil)
         #expect(!SettingsCatalog.isSynced("bt_seed_time_limit_unit"))
+    }
+
+    @Test func peerBudgetRowsMatchTheDaemonRangesAndDefaults() {
+        #expect(SettingsCatalog.field("bt_peer_connect_limit")?.kind == .integer(min: 32, max: 256))
+        #expect(SettingsCatalog.field("bt_peer_connect_limit")?.defaultWire == "64")
+        #expect(SettingsCatalog.field("bt_session_peer_limit")?.kind == .integer(min: 128, max: 4_096))
+        #expect(SettingsCatalog.field("bt_session_peer_limit")?.defaultWire == "1024")
+        // 每次会话构造时生效的纯本机资源参数：不参与云同步。
+        #expect(!SettingsCatalog.isSynced("bt_peer_connect_limit"))
+        #expect(!SettingsCatalog.isSynced("bt_session_peer_limit"))
+    }
+
+    @Test func rowTitlesAndDetailsResolveInTheSharedI18nTable() {
+        let english = L10n(locale: "en")
+        // 缺键是 bug（`L` 会把键名当文案回退）：这三行的标题与说明必须命中共享表。
+        for row in [BtSettingsRow.peerLimit, .peerConnectLimit, .sessionPeerLimit] {
+            #expect(english.has(row.titleKey), "missing title key \(row.titleKey)")
+            if let detailKey = row.detailKey { #expect(english.has(detailKey), "missing detail key \(detailKey)") }
+        }
     }
 
     @Test func searchTargetsMapToTheirTab() {

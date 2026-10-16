@@ -24,7 +24,7 @@ nonisolated enum BtSettingsTab: String, CaseIterable, Identifiable {
 /// 做种「时长 + 单位」两个 PC 行在移动端合成一行（各自仍写回两个键）。
 nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
     case enabled
-    case dht, upnp, utp, portStart, portEnd, peerLimit, mseMode
+    case dht, upnp, utp, portStart, portEnd, peerLimit, peerConnectLimit, sessionPeerLimit, mseMode
     case customTrackers, trackerSub, trackerSubUrls, trackerSubStatus
     case seedEnabled, seedMaxActive, autoReseed, seedRatio, seedPostRatio
     case seedTimeLimit, seedInactiveTimeLimit, seedOperator, seedThenAction
@@ -33,7 +33,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
 
     var tab: BtSettingsTab {
         switch self {
-        case .enabled, .dht, .upnp, .utp, .portStart, .portEnd, .peerLimit, .mseMode: .general
+        case .enabled, .dht, .upnp, .utp, .portStart, .portEnd, .peerLimit, .peerConnectLimit, .sessionPeerLimit, .mseMode: .general
         case .customTrackers, .trackerSub, .trackerSubUrls, .trackerSubStatus: .tracker
         default: .seeding
         }
@@ -48,6 +48,8 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
         case .portStart: "bt_port_start"
         case .portEnd: "bt_port_end"
         case .peerLimit: "bt_peer_limit"
+        case .peerConnectLimit: "bt_peer_connect_limit"
+        case .sessionPeerLimit: "bt_session_peer_limit"
         case .mseMode: "bt_mse_mode"
         case .customTrackers: "bt_custom_trackers"
         case .trackerSub: "bt_tracker_sub_enabled"
@@ -92,6 +94,8 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
         case .portStart: "btListenPortStart"
         case .portEnd: "btListenPortEnd"
         case .peerLimit: "btPeerLimit"
+        case .peerConnectLimit: "btPeerConnectLimit"
+        case .sessionPeerLimit: "btSessionPeerLimit"
         case .mseMode: "btMseMode"
         case .customTrackers: "btTrackerList"
         case .trackerSub: "btTrackerSub"
@@ -118,6 +122,8 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
         case .utp: "btEnableUtpDesc"
         case .portStart: "btListenPortDesc"
         case .peerLimit: "btPeerLimitDesc"
+        case .peerConnectLimit: "btPeerConnectLimitDesc"
+        case .sessionPeerLimit: "btSessionPeerLimitDesc"
         case .mseMode: "btMseModeDesc"
         case .customTrackers: "btTrackerListDesc"
         case .trackerSub: "btTrackerSubDesc"

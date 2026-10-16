@@ -4318,6 +4318,12 @@ impl DownloadManager {
     /// active-seeder cap) take effect immediately; session-level settings
     /// (ports, DHT, trackers) take effect when the next BT session is created
     /// (either on first BT download or after `invalidate_bt_session`).
+    ///
+    /// `seed_max_active` and the live `bt_peer_limit` take effect on the
+    /// running session immediately. The admission budgets
+    /// (`bt_peer_connect_limit` / `bt_session_peer_limit`) are baked into the
+    /// session at construction, so they apply the next time the shared BT
+    /// session is built — the client shows the existing restart hint.
     pub fn set_bt_config(&mut self, config: BtConfig) {
         // 活动做种数上限热生效：直接写入 SeedingManager，队列在下一次
         // 做种求值 tick 的 reconcile 中被重新平衡。

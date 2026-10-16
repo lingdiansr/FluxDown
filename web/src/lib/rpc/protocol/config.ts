@@ -211,6 +211,8 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   int('bt_port_start', '6881', 1, 65_535),
   int('bt_port_end', '6891', 1, 65_535),
   int('bt_peer_limit', '256', 128, 512),
+  int('bt_peer_connect_limit', '64', 32, 256),
+  int('bt_session_peer_limit', '1024', 128, 4_096),
   oneOf('bt_mse_mode', 'enabled', BT_MSE_MODES),
   text('bt_custom_trackers'),
   bool('bt_tracker_sub_enabled', 'true'),

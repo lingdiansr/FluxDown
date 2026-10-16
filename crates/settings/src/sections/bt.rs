@@ -75,6 +75,16 @@ fn basic_section(ctx: &SectionContext, bt_enabled: bool) -> SettingsSection {
             ctx.daemon_number("bt_peer_limit"),
         ))
         .row(ctx.item(
+            "btPeerConnectLimit",
+            Some("btPeerConnectLimitDesc"),
+            ctx.daemon_number("bt_peer_connect_limit"),
+        ))
+        .row(ctx.item(
+            "btSessionPeerLimit",
+            Some("btSessionPeerLimitDesc"),
+            ctx.daemon_number("bt_session_peer_limit"),
+        ))
+        .row(ctx.item(
             "btMseMode",
             Some("btMseModeDesc"),
             ctx.daemon_enum_dropdown("bt_mse_mode", "btMseMode"),

@@ -83,6 +83,34 @@ describe('daemon 配置目录镜像', () => {
     }
   })
 
+  // BT 三个 Peer 预算键必须存在：漏掉任一个，`normalizeDaemonValue` 都会在 Web 上
+  // 拒绝写入（桌面同项正常），且默认值/边界漂移会静默改变输入框范围。
+  test('BT Peer 预算键的类型、默认值与边界与 Rust 逐条一致', async () => {
+    const expected = [
+      // 实时（已建立）任务 Peer 上限；半开拨号另由 bt_peer_connect_limit 计费。
+      { key: 'bt_peer_limit', kind: 'integer', default: '256', min: 128, max: 512 },
+      // 单任务半开连接上限。
+      { key: 'bt_peer_connect_limit', kind: 'integer', default: '64', min: 32, max: 256 },
+      // 会话 Peer 连接预算（含连接尝试与磁力 metadata）。
+      { key: 'bt_session_peer_limit', kind: 'integer', default: '1024', min: 128, max: 4_096 },
+    ] as const
+    const rust = await rustFields()
+    for (const want of expected) {
+      const web = daemonConfigField(want.key)
+      expect(web !== undefined).toBe(true)
+      expect(web?.kind).toBe(want.kind)
+      expect(web?.default).toBe(want.default)
+      expect(web?.min).toBe(want.min)
+      expect(web?.max).toBe(want.max)
+      // 同一份期望值再与 Rust 目录对账，确保这里写死的数字不是自说自话。
+      const canonical = rust.find((field) => field.key === want.key)
+      expect(canonical?.kind).toBe('Integer')
+      expect(canonical?.default).toBe(want.default)
+      expect(canonical?.min).toBe(want.min)
+      expect(canonical?.max).toBe(want.max)
+    }
+  })
+
   test('枚举键在 Web 侧带可选值且包含默认值', async () => {
     for (const rust of await rustFields()) {
       if (rust.kind !== 'Enum') continue

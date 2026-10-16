@@ -155,8 +155,23 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     ),
     field(
         "bt_peer_limit",
+        // Live (established) peer ceiling per torrent. Half-open dials are
+        // budgeted separately by `bt_peer_connect_limit`.
         DaemonConfigKind::Integer { min: 128, max: 512 },
         "256",
+    ),
+    field(
+        "bt_peer_connect_limit",
+        DaemonConfigKind::Integer { min: 32, max: 256 },
+        "64",
+    ),
+    field(
+        "bt_session_peer_limit",
+        DaemonConfigKind::Integer {
+            min: 128,
+            max: 4096,
+        },
+        "1024",
     ),
     field(
         "bt_mse_mode",
@@ -479,6 +494,22 @@ mod tests {
         );
         assert!(normalize_daemon_config_value("bt_peer_limit", "127").is_err());
         assert!(normalize_daemon_config_value("bt_peer_limit", "513").is_err());
+        assert_eq!(
+            normalize_daemon_config_value("bt_peer_connect_limit", "32").as_deref(),
+            Ok("32")
+        );
+        assert_eq!(
+            normalize_daemon_config_value("bt_peer_connect_limit", "256").as_deref(),
+            Ok("256")
+        );
+        assert!(normalize_daemon_config_value("bt_peer_connect_limit", "31").is_err());
+        assert!(normalize_daemon_config_value("bt_peer_connect_limit", "257").is_err());
+        assert_eq!(
+            normalize_daemon_config_value("bt_session_peer_limit", "4096").as_deref(),
+            Ok("4096")
+        );
+        assert!(normalize_daemon_config_value("bt_session_peer_limit", "127").is_err());
+        assert!(normalize_daemon_config_value("bt_session_peer_limit", "4097").is_err());
         assert!(normalize_daemon_config_value("cdn_max_nodes", "9").is_err());
         assert!(normalize_daemon_config_value("bt_tracker_sub_cache", "x").is_err());
         assert!(normalize_daemon_config_value("nope", "x").is_err());

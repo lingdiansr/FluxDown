@@ -66,7 +66,8 @@ private const val K_SEED_MAIN = "seed-main"
 private const val K_SEED_LIMITS = "seed-limits"
 
 private fun itemKeyOf(row: BtSettingsRow): String = when (row) {
-    BtSettingsRow.Enabled, BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.Utp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd, BtSettingsRow.PeerLimit, BtSettingsRow.MseMode -> K_GENERAL
+    BtSettingsRow.Enabled, BtSettingsRow.Dht, BtSettingsRow.Upnp, BtSettingsRow.Utp, BtSettingsRow.PortStart, BtSettingsRow.PortEnd,
+    BtSettingsRow.PeerLimit, BtSettingsRow.PeerConnectLimit, BtSettingsRow.SessionPeerLimit, BtSettingsRow.MseMode -> K_GENERAL
     BtSettingsRow.CustomTrackers -> K_TRACKER_LIST
     BtSettingsRow.TrackerSub, BtSettingsRow.TrackerSubUrls, BtSettingsRow.TrackerSubStatus -> K_TRACKER_SUB
     BtSettingsRow.SeedEnabled, BtSettingsRow.SeedMaxActive, BtSettingsRow.AutoReseed -> K_SEED_MAIN
@@ -89,6 +90,8 @@ private fun titleOf(row: BtSettingsRow): Int = when (row) {
     BtSettingsRow.PortStart -> R.string.btListenPortStart
     BtSettingsRow.PortEnd -> R.string.btListenPortEnd
     BtSettingsRow.PeerLimit -> R.string.btPeerLimit
+    BtSettingsRow.PeerConnectLimit -> R.string.btPeerConnectLimit
+    BtSettingsRow.SessionPeerLimit -> R.string.btSessionPeerLimit
     BtSettingsRow.MseMode -> R.string.btMseMode
     BtSettingsRow.CustomTrackers -> R.string.btTrackerList
     BtSettingsRow.TrackerSub -> R.string.btTrackerSub
@@ -114,6 +117,8 @@ private fun detailOf(row: BtSettingsRow): Int? = when (row) {
     BtSettingsRow.Utp -> R.string.btEnableUtpDesc
     BtSettingsRow.PortStart -> R.string.btListenPortDesc
     BtSettingsRow.PeerLimit -> R.string.btPeerLimitDesc
+    BtSettingsRow.PeerConnectLimit -> R.string.btPeerConnectLimitDesc
+    BtSettingsRow.SessionPeerLimit -> R.string.btSessionPeerLimitDesc
     BtSettingsRow.MseMode -> R.string.btMseModeDesc
     BtSettingsRow.CustomTrackers -> R.string.btTrackerListDesc
     BtSettingsRow.TrackerSub -> R.string.btTrackerSubDesc
@@ -284,6 +289,29 @@ private fun GeneralSection(ctx: SettingsCtx) {
                 range = 128L..512L,
                 default = 256L,
                 id = BtSettingsRow.PeerLimit.id,
+            )
+        }
+
+        if (BtSettingsRow.PeerConnectLimit.isVisible(form)) {
+            settingNumber(
+                ctx,
+                BtSettingsRow.PeerConnectLimit.configKey,
+                R.string.btPeerConnectLimit,
+                R.string.btPeerConnectLimitDesc,
+                range = 32L..256L,
+                default = 64L,
+                id = BtSettingsRow.PeerConnectLimit.id,
+            )
+        }
+        if (BtSettingsRow.SessionPeerLimit.isVisible(form)) {
+            settingNumber(
+                ctx,
+                BtSettingsRow.SessionPeerLimit.configKey,
+                R.string.btSessionPeerLimit,
+                R.string.btSessionPeerLimitDesc,
+                range = 128L..4096L,
+                default = 1024L,
+                id = BtSettingsRow.SessionPeerLimit.id,
             )
         }
 

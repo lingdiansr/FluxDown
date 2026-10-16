@@ -227,6 +227,16 @@ pub fn bt_config_from_map(
             .and_then(|value| value.parse::<usize>().ok())
             .map(fluxdown_engine::bt_downloader::normalize_bt_peer_limit)
             .unwrap_or(fluxdown_engine::bt_downloader::BT_PEER_LIMIT_DEFAULT),
+        peer_connect_limit: cfg
+            .get("bt_peer_connect_limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(fluxdown_engine::bt_downloader::normalize_bt_peer_connect_limit)
+            .unwrap_or(fluxdown_engine::bt_downloader::BT_PEER_CONNECT_LIMIT_DEFAULT),
+        session_peer_limit: cfg
+            .get("bt_session_peer_limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(fluxdown_engine::bt_downloader::normalize_bt_session_peer_limit)
+            .unwrap_or(fluxdown_engine::bt_downloader::BT_SESSION_PEER_LIMIT_DEFAULT),
         custom_trackers: cfg.get("bt_custom_trackers").cloned().unwrap_or_default(),
         subscription_trackers: if subscription_enabled {
             cfg.get("bt_tracker_sub_cache").cloned().unwrap_or_default()

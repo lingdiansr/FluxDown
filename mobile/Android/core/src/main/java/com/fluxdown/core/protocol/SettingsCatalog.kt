@@ -103,6 +103,8 @@ object SettingsCatalog {
         daemon("bt_port_start", int(1, 65_535), "6881"),
         daemon("bt_port_end", int(1, 65_535), "6891"),
         daemon("bt_peer_limit", int(128, 512), "256"),
+        daemon("bt_peer_connect_limit", int(32, 256), "64"),
+        daemon("bt_session_peer_limit", int(128, 4096), "1024"),
         daemon("bt_mse_mode", choice(btMseModes), "enabled"),
         daemon("bt_custom_trackers", text, ""),
         daemon("bt_tracker_sub_enabled", bool, "true"),

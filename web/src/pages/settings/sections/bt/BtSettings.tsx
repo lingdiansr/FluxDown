@@ -28,6 +28,8 @@ function BasicTab({ btEnabled }: { btEnabled: boolean }) {
           <DaemonNumberRow configKey="bt_port_start" titleKey="btListenPortStart" descKey="btListenPortDesc" />
           <DaemonNumberRow configKey="bt_port_end" titleKey="btListenPortEnd" />
           <DaemonNumberRow configKey="bt_peer_limit" titleKey="btPeerLimit" descKey="btPeerLimitDesc" />
+          <DaemonNumberRow configKey="bt_peer_connect_limit" titleKey="btPeerConnectLimit" descKey="btPeerConnectLimitDesc" />
+          <DaemonNumberRow configKey="bt_session_peer_limit" titleKey="btSessionPeerLimit" descKey="btSessionPeerLimitDesc" />
           <DaemonEnumRow configKey="bt_mse_mode" titleKey="btMseMode" descKey="btMseModeDesc" labelPrefix="btMseMode" />
         </>
       ) : null}

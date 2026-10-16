@@ -78,6 +78,12 @@ struct BtPage: View {
             if BtSettingsRow.peerLimit.isVisible(in: form) {
                 ConfigNumberRow(item: BtSettingsRow.peerLimit.item, range: 128 ... 512, fallback: 256)
             }
+            if BtSettingsRow.peerConnectLimit.isVisible(in: form) {
+                ConfigNumberRow(item: BtSettingsRow.peerConnectLimit.item, range: 32 ... 256, fallback: 64)
+            }
+            if BtSettingsRow.sessionPeerLimit.isVisible(in: form) {
+                ConfigNumberRow(item: BtSettingsRow.sessionPeerLimit.item, range: 128 ... 4_096, fallback: 1_024)
+            }
             if BtSettingsRow.mseMode.isVisible(in: form) { BtMseModeRow() }
             Text(L("btSettingsRestartHint")).textCase(nil)
         } footer: {

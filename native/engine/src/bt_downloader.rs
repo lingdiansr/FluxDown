@@ -416,9 +416,42 @@ pub const BT_PEER_LIMIT_MIN: usize = 128;
 pub const BT_PEER_LIMIT_MAX: usize = 512;
 pub const BT_PEER_LIMIT_DEFAULT: usize = 256;
 
+/// Outbound *connecting* peers per torrent. Bounded separately from
+/// [`BT_PEER_LIMIT_*`] so half-open dials cannot occupy the whole live budget;
+/// the session budget may still clamp it lower.
+pub const BT_PEER_CONNECT_LIMIT_MIN: usize = 32;
+pub const BT_PEER_CONNECT_LIMIT_MAX: usize = 256;
+pub const BT_PEER_CONNECT_LIMIT_DEFAULT: usize = 64;
+
+/// Session-wide logical peer budget (connecting + handshaking + metadata +
+/// live), shared by every download and seeder.
+pub const BT_SESSION_PEER_LIMIT_MIN: usize = 128;
+pub const BT_SESSION_PEER_LIMIT_MAX: usize = 4096;
+pub const BT_SESSION_PEER_LIMIT_DEFAULT: usize = 1024;
+
 #[must_use]
 pub fn normalize_bt_peer_limit(value: usize) -> usize {
     value.clamp(BT_PEER_LIMIT_MIN, BT_PEER_LIMIT_MAX)
+}
+
+#[must_use]
+pub fn normalize_bt_peer_connect_limit(value: usize) -> usize {
+    value.clamp(BT_PEER_CONNECT_LIMIT_MIN, BT_PEER_CONNECT_LIMIT_MAX)
+}
+
+#[must_use]
+pub fn normalize_bt_session_peer_limit(value: usize) -> usize {
+    value.clamp(BT_SESSION_PEER_LIMIT_MIN, BT_SESSION_PEER_LIMIT_MAX)
+}
+
+/// Global connecting budget derived from the session budget.
+///
+/// The connecting share is a quarter of the session budget, capped so a large
+/// session budget does not turn into a dial storm; metadata probes are bounded
+/// by the per-torrent connecting quota on top of this.
+#[must_use]
+pub fn bt_session_connect_limit(session_peer_limit: usize) -> usize {
+    (session_peer_limit / 4).clamp(1, 128)
 }
 
 /// User-configurable BT session settings, loaded from the DB config table.
@@ -457,7 +490,16 @@ pub struct BtConfig {
     /// beyond the cap wait in a FIFO seeding queue until a slot frees up.
     pub seed_max_active: usize,
     /// Per-torrent peer admission limit for newly added torrents.
+    ///
+    /// This is the *live* peer ceiling per torrent. Outbound connection
+    /// attempts are bounded separately by [`Self::peer_connect_limit`] so a
+    /// torrent cannot consume its whole peer budget with half-open dials.
     pub peer_limit: usize,
+    /// Outbound *connecting* peers allowed per torrent.
+    pub peer_connect_limit: usize,
+    /// Logical peer connections allowed across the whole session, counting
+    /// connecting, handshaking, magnet-metadata and live peers.
+    pub session_peer_limit: usize,
     /// MSE (Message Stream Encryption) policy for BT peer connections.
     /// Emergency escape hatch settable via config API/CLI; no Settings UI.
     pub mse_mode: BtMseMode,
@@ -482,6 +524,8 @@ impl Default for BtConfig {
             seed_then_action: "stop".to_string(),
             seed_max_active: 0,
             peer_limit: BT_PEER_LIMIT_DEFAULT,
+            peer_connect_limit: BT_PEER_CONNECT_LIMIT_DEFAULT,
+            session_peer_limit: BT_SESSION_PEER_LIMIT_DEFAULT,
             mse_mode: BtMseMode::Enabled,
         }
     }
@@ -643,6 +687,8 @@ impl SharedBtSession {
         // so diminishing returns beyond 8 threads; capping here saves ~2 MB of
         // stack memory per thread avoided.
         let peer_limit = normalize_bt_peer_limit(bt_config.peer_limit);
+        let peer_connect_limit = normalize_bt_peer_connect_limit(bt_config.peer_connect_limit);
+        let session_peer_limit = normalize_bt_session_peer_limit(bt_config.session_peer_limit);
 
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -788,6 +834,14 @@ impl SharedBtSession {
             }),
             // 连接中与已连接共用此上限，见 `BT_PEER_LIMIT_DEFAULT`。
             peer_limit: Some(peer_limit),
+            // 会话级准入预算：把「半开拨号 / 握手 + 磁力 metadata / 已建立」
+            // 分开计数，单任务半开值不再从 live 上限里扣。
+            peer_admission: librqbit::PeerAdmissionConfig {
+                session_peer_limit,
+                torrent_connect_limit: peer_connect_limit,
+                session_connect_limit: bt_session_connect_limit(session_peer_limit),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let start_session = |dht: bool| -> anyhow::Result<Arc<Session>> {
@@ -931,7 +985,7 @@ impl SharedBtSession {
         }
 
         log_info!(
-            "[BT] shared session created (DHT={}, UPnP={}, uTP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, peer_limit={}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
+            "[BT] shared session created (DHT={}, UPnP={}, uTP={}, ports={}-{}, listen_addr={:?}, mse_mode={:?}, peer_limit={}, peer_connect_limit={}, session_peer_limit={}, {} trackers, speed_limit={} B/s, upload_limit={} B/s, worker_threads={}, persistence=on)",
             enable_dht,
             enable_upnp,
             enable_utp,
@@ -940,6 +994,8 @@ impl SharedBtSession {
             session.listen_addr(),
             bt_config.mse_mode,
             peer_limit,
+            peer_connect_limit,
+            session_peer_limit,
             total_tracker_count,
             speed_limit_bps,
             upload_limit_bps,
