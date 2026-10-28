@@ -1,0 +1,75 @@
+metric_id,priority,stage,name,unit,scope,numerator,denominator,time_window,event_or_sampling,reset_and_censoring,source_anchor,availability,overhead,confounders,experiment_ids
+M-START-01,P0,start,请求受理到 metadata 可用时延,s,run,t_metadata_ready-t_accept,1,单次运行,事件驱动（metadata 就绪）;自带 .torrent 时记 N/A 不记 0,不重置;未达 metadata 的 run 按竞争事件处理,rqbit session metadata 就绪信号 + FD task 状态机,available,低（session 内事件）,tracker/DHT 延迟;magnet 与 .torrent 差异;infohash 是否已缓存,E0;E1;E3
+M-START-02,P0,start,请求受理到首个 wire payload 时延,s,run,t_first_payload-t_accept,1,单次运行,事件驱动（首个 payload 字节）,按连接代际重置;失败 run 右删失计入完成比例,FD:BtPeerStats 需新增首字节时间戳;当前仅 per-peer fetched_bytes 聚合,partial,低,连接建立慢与对端不给数据混淆;MSE 协商额外往返,E0;E1;E2
+M-START-03,P0,start,请求受理到首个新校验通过 piece 时延,s,run,t_first_verified_piece-t_accept,1,单次运行,事件驱动（piece hash 通过）,不重置;已存在本地 piece 时须区分「新下载」与「启动前已有」,rqbit:downloaded_and_checked_pieces 增量 + FD 进度事件,partial,低,"fastresume 预置 piece 会让该值接近 0;sparse/partfile 影响",E0;E1;E3
+M-START-04,P0,start,启动成功比例与失败原因分布,ratio,run,达到各里程碑的 run 数,总 run 数,固定观察期 tau,按 run 计数,右删失单列;终止性错误与取消作竞争事件,任务状态机终态 + 失败原因枚举,available,低,"tau 选择影响比例;未决 run 不能当失败",E0;E1;E3
+M-COMPLETE-01,P0,complete,wall completion（请求受理到选定文件全部校验且可用）,s,run,t_done-t_accept,1,单次运行,事件驱动（选定内容校验 + 文件可用）,不重置;未核验持久化不得称「断电安全完成」,FD task 完成事件 + 文件校验结果,available,中（全量校验）,预分配大小或 downloaded==total 不能推完成;最终搬移耗时,E0;E1;E2;E3
+M-COMPLETE-02,P0,complete,active completion（剔除显式暂停的 wall time）,s,run,t_done-t_accept-sum(暂停生效区间),1,单次运行,事件驱动 + 暂停区间累计,只扣显式用户暂停的实际生效区间;不扣网络故障/排队/退避/初检/自然停滞,FD 暂停生效时间戳 + 完成事件,available,低,"暂停请求与生效不等价;暂停期间残留流量需单列",E0;E1;E3
+M-COMPLETE-03,P0,complete,tail time（95% 到完成）,s,run,t_done-t_95pct,1,单次运行,事件驱动（V(t) 首次达 0.95B）,不重置;长尾是主指标不是噪声,FD 进度事件 + 完成事件,available,低,"95% 阈值选择;稀疏 piece 覆盖度;单高速 seed 退出",E1;E3
+M-COMPLETE-04,P0,complete,失败/超时/放弃比例,ratio,run,失败或超时 run 数,总 run 数,固定观察期 tau,按 run 计数,右删失与终止性错误分开;不删慢失败 run,任务终态 + 用户取消标记,available,低,"管理员截止不等于实现上限;取消原因需分类",E0;E1;E2;E3
+M-COMPLETE-05,P0,complete,启动前初检耗时,s,run,t_metadata_ready-t_accept 之后的本地校验阶段,1,单次运行,事件驱动,"不重置;与 metadata 获取分开报",FD 引擎初始化阶段标记,partial,中（磁盘读）,fastresume 可信度;机械盘随机读,E0;E1
+M-COMPLETE-06,P0,complete,最终校验与搬移耗时,s,run,最后一块校验完成到文件可用,1,单次运行,事件驱动,不重置;与传输时间分开报,FD 完成阶段标记 + 文件重命名/搬移日志,partial,中,"全量重校 vs 采样校验;跨盘搬移",E0;E1;E2
+M-GOODPUT-01,P0,transfer,整程 goodput,MiB/s,run,"V(t_done)-V(t_accept)","t_done-t_accept","整个 run","派生（不重叠快照差分）",按连接代际重置不得改变 V(t);真实失效允许 V(t) 下降且不加回,FD 已验证字节单调口径 + DB 任务字段,partial,低,"累计 wire payload / fetched / checked / 唯一有效文件进度不可混用",E0;E1;E2;E3
+M-GOODPUT-02,P0,transfer,阶段 goodput,MiB/s,window,阶段内 V 增量,阶段时长,阶段边界（metadata 后/首 piece 后/90% 后）,派生,阶段划分须预先固定;不因结果改边界,同上 + 阶段事件时间戳,partial,低,阶段自动分割的启发式不稳,E1;E3
+M-GOODPUT-03,P0,transfer,10s 窗 goodput 分布（p10/p50/p90）,MiB/s,window,V 增量,10s,不重叠 10s,派生,窗边界不重叠;窗口内无有效进度记 0 不丢弃,FD 采样序列 + V(t),partial,中,"快照抖动;V(t) 回落",E1;E2;E3
+M-GOODPUT-04,P0,transfer,30s 窗 goodput（敏感度分析）,MiB/s,window,V 增量,30s,不重叠 30s,派生,同 M-GOODPUT-03,同 M-GOODPUT-03,partial,低,与 10s 窗不一致时须报告两者,E1;E3
+M-GOODPUT-05,P0,transfer,固定观察期完成比 V(tau)/B,ratio,run,V(tau),B,预先固定 tau,单次判定,右删失规则预先声明;tau 是观察预算不是产品 SLO,FD 已验证字节 + 选项总字节（排除 padding 与未选文件）,available,低,"tau 由实验预设;B 定义（是否含 padding）必须固定",E0;E1;E2;E3
+M-STAB-01,P0,stability,无有效进度间隔分布（p50/p90/max）,s,run,连续无 V(t) 增长区间长度,1,整个 run,事件驱动（停滞事件定义：连续 10s 无新增有用 payload）,暂停区间单列不计入自然停滞;停滞事件按 5s/30s 阈值作敏感度,FD V(t) 采样序列,partial,低,"短于采样周期的进展不可见;校验中落盘造成的滞后",E1;E2;E3
+M-STAB-02,P0,stability,最长停滞,s,run,max(无进度区间),1,整个 run,事件驱动,不重置;与 M-STAB-01 分开报,同 M-STAB-01,partial,低,自然无进展不得从 active 时间剔除,E1;E3
+M-STAB-03,P0,stability,窗口速率 p10/p50/p90,MiB/s,window,窗口内 V 增量,窗口时长,10s 与 30s 两档,派生,少样本不报 p99,同 M-GOODPUT-03,partial,中,快照间隔与 V(t) 抖动,E1;E3
+M-STAB-04,P0,stability,完成时间跨 run 分布（中位数/IQR）,s,swarm,run 完成时间集合,run 数,整个实验块,按 run 计数,删失 run 用生存口径;不只比较成功者均速,任务完成事件,available,低,"样本量小;时间块内网络条件漂移",E1;E2;E3
+M-STAB-05,P0,stability,停滞事件计数（阈值敏感度）,count,run,停滞事件数,1,整个 run,事件驱动,不重置;须同时报「已收 payload 但 piece 未验证」的停滞,FD V(t) 序列 + 校验事件,partial,中,"验证滞后会把正常下载记成停滞",E0;E1
+M-GUARD-01,P0,resource,空载与带载 RTT 差,ms,host,RTT_loaded-RTT_idle,1,每条件 ≥60s,独立许可探测端周期性探测,不重置;探测端与下载主机同一路径才可比,probe:独立空载/带载探测端,missing,中,"无探测端授权即缺口;探测流量本身影响被测",E1;E2
+M-GUARD-02,P0,resource,丢包与重传率,ratio,host,重传字节,发送字节,每条件 ≥60s,内核计数器采样,不重置;需与 M-GUARD-01 同窗口,OS:/proc/net/snmp;OS:TCP_INFO / ss -ti,partial,低,"TUN/代理会掩盖真实重传",E1;E2
+M-GUARD-03,P0,resource,CPU 分线程与系统态占用,percent,host,进程用户态与内核态 CPU 时间增量,采样间隔,1s,内核计数器采样,按进程采样;线程级需 /proc/<pid>/task,OS:/proc/<pid>/stat 与 /proc/<pid>/task/*/stat,available,低,校验线程与网络线程需分开报,E0;E1;E2
+M-GUARD-04,P0,resource,RSS 与内核 socket 内存,B,host,RSS 增量,1,1s,内核计数器采样,不重置;process RSS 不覆盖内核内存,OS:/proc/<pid>/status VmRSS;OS:/proc/net/sockstat 与 udp_mem,partial,低,page cache 不计入 RSS,E0;E1;E2
+M-GUARD-05,P0,resource,FD 与 socket 数,count,host,打开 FD 数,RLIMIT_NOFILE,1s,内核计数器采样,不重置;接近 rlimit 需单独报警,OS:/proc/<pid>/fd 计数;OS:RLIMIT_NOFILE,available,低,与 bt_peer_limit / 文件句柄池相关,E0;E1
+M-GUARD-06,P0,resource,UDP drops,count,host,UDP 接收错误与缓冲丢包,1,1s,内核计数器采样,不重置;需与 uTP 活跃度同窗口,OS:/proc/net/udp 与 /proc/net/snmp UdpInErrors,available,低,"UDP drops 可能是内核缓冲而非应用",E1;E2
+M-GUARD-07,P0,resource,磁盘队列深度与延迟,ms,host,I/O 等待时间,请求数,1s,内核计数器采样,不重置;机械盘与 SSD 不可混报,OS:/proc/diskstats 与 /sys/block/*/queue/*,partial,低,"写回缓存掩盖真实延迟",E1;E2
+M-GUARD-08,P0,resource,校验耗时与 CPU 占比,s,host,piece hash 校验累计时间,运行时长,整个 run,累计计数器差分,不重置;与传输时间重叠部分须说明,FD 校验计数 + OS CPU 采样,partial,中,"校验与下载并发度决定是否成为瓶颈",E1
+M-DISC-01,P0,discovery,各发现来源请求/响应/失败阶段/耗时,count,run,每来源请求与响应数,1,整个 run,事件驱动,按 torrent 生命周期累计;跨 epoch 默认重启计数,FD/rqbit 需新增 source flags 与阶段枚举,missing,中,"来源标记可重叠;tracker 订阅成功不等于 announce 成功",E0;E1;E3
+M-DISC-02,P0,discovery,候选总数与去重后候选数,count,run,去重后地址数,1,整个 run,事件驱动,按 torrent 生命周期累计;同一地址多来源只算一次,FD/rqbit 需 peer 去重键（任务内不可逆哈希）,missing,中,"用地址直接做长期标识不可接受",E0;E1;E3
+M-DISC-03,P0,discovery,候选到贡献 payload 漏斗（candidate→transport→handshake→window payload）,count; B,run,各阶段通过数与窗口 payload,各阶段输入数,整个 run,事件驱动,分阶段计数;未决数单列,FD/rqbit 需阶段化计数（见 bt-observability-plan）,missing,中,窗口近似会与 cohort 口径不一致,E0;E1;E2;E3
+M-CONN-01,P0,connect,逻辑 peer attempt 数,count,run,准入放行的尝试数,1,整个 run,累计计数器差分,按 torrent 生命周期累计;session 重建重置,FD:BtPeerStats.connection_attempts（语义待核）+ rqbit 需细化,partial,低,"live/seen 不是成功率;connecting 计入逻辑预算",E0;E1
+M-CONN-02,P0,connect,transport attempts（TCP/uTP 分列）,count,run,各 transport 连接尝试数,1,整个 run,累计计数器差分,按 transport 分列;session 重建重置,rqbit:PeerStats.conn_kind（tcp/utp/socks）,partial,低,"uTP 与 TCP 竞速会让同一 peer 产生两次 attempt",E1;E2
+M-CONN-03,P0,handshake,BT/MSE handshake attempts,count,run,进入握手的尝试数,1,整个 run,累计计数器差分,按 torrent 生命周期累计;MSE 启用与否分开报,rqbit:mse 模块 + 需新增握手阶段计数,missing,中,"transport success 不等于 handshake success",E0;E1;E2
+M-CONN-04,P0,handshake,握手终态与阶段时延 p50/p95,ms,run,阶段耗时分位,1,整个 run,事件驱动 + 固定窗口聚合,分位数须在固定窗口或 ring buffer 上算;不分配无界历史,rqbit 需升级 PeerCounters（见 bt-observability-plan 2.3）,missing,中,"p95 在少样本下不稳",E0;E1;E2
+M-CONN-05,P0,connect,在途连接数（connecting / handshaking）,count,run,当前占用许可的 peer 数,1,1s,采样,point-in-time 与生命周期累计须分开,rqbit:PeerAdmission 四信号量可用许可 + FD:BtPeerStats.connecting,partial,低,"connecting 可已顶格却无有效 peer",E0;E1
+M-CONN-06,P0,connect,准入拒绝与占比（分原因）,count,run,AdmissionDenied 各原因计数,1,整个 run,累计计数器差分,不重置;无采集权限时留空并标 missing,rqbit:PeerAdmission.rejected（现为单计数）;需按 AdmissionDenied 分列,missing,低,"由 0 推「无拒绝」是错误推断",E0;E1;E2
+M-CONN-07,P0,handshake,握手成功率（分子/分母/未决）,ratio,run,握手成功数,握手尝试数,整个 run 或固定窗口,派生,必须同时输出分子分母与未决数;按 cohort 计算或说明窗口近似,rqbit 需新增握手成功计数,missing,低,"绝不能只输出百分比",E0;E1;E2
+M-BUDGET-01,P0,budget,配置硬上限（per-task / session）,count,task,BT_PEER_LIMIT 或 BT_SESSION_PEER_LIMIT,1,整个 run,配置读取,配置变更需重建 session 才生效,FD:bt_downloader.BT_PEER_LIMIT_* 与 BT_SESSION_PEER_LIMIT_*,available,低,硬上限不等于运行时额度,E0;E1
+M-BUDGET-02,P0,budget,有效出站上限（扣除入站保留）,count,session,outbound_budget(session_peer_limit; global_reserve),1,整个 run,派生,配置变更时重算,rqbit:PeerAdmissionConfig.global_reserve 与 connecting_reserve,available,低,保留量随预算变化（16/8..64/16）,E0;E1
+M-BUDGET-03,P0,budget,实际占用（occupancy）,count,session,当前占用许可数,有效上限,1s,采样,不重置;与 M-CONN-05 区分「许可占用」与「live」,rqbit 四信号量可用许可差分,partial,低,多任务共享不能当每任务各享额度,E0;E1;E2
+M-BUDGET-04,P0,budget,满额时长比例,ratio,session,occupancy==上限的采样数,总采样数,"每条件 ≥60s",采样判定,不重置;满额只证明某闸门绑定,同 M-BUDGET-03,partial,低,"满额不等于该闸门是瓶颈",E0;E1
+M-BUDGET-05,P0,budget,排队时长（候选等待准入）,s,run,从入队到获得许可的时间,1,整个 run,事件驱动,不重置;队列上千 peer 时需抽样,rqbit peer queue 状态转换,missing,中,"排队时长与候选总量相关",E0;E1;E3
+M-BUDGET-06,P0,budget,控制动作与限额原因计数,count,run,各控制动作次数,1,整个 run,累计计数器差分,不重置;另报触发时的 occupancy,rqbit 控制路径 + FD 配置热更新路径,missing,中,"把重启扰动当动态调整收益是错的",E0;E1
+M-PEER-01,P1,ecosystem,窗口贡献 peer 数,count,task,窗口内 fetched 增量 >0 的 peer 数,1,每个采样窗口,派生,按窗口计算;与 M-PEER-02 的 point-in-time useful 分开命名,FD/rqbit per-peer snapshot 差分,partial,中,"per-peer 列表在大 swarm 有分配与 wire 压力",E0;E1;E3
+M-PEER-02,P1,ecosystem,useful peer 数（当前连接中 fetched≥1MiB 者）,count,task,fetched_bytes>=1MiB 且仍连接的 peer 数,1,每个采样窗口,采样,point-in-time:peer 断开会 decrement（非单调生命周期累计）;阈值只在首次跨越时计一次,FD:BtPeerStats.useful_peers,available,低,"口径易被误读为「生命周期累计」（文档措辞如此但代码是 point-in-time）;rqbit USEFUL_PEER_BYTES 注释写「peer 从我们这里取走」属上传语义而代码在下行 on_received_piece 路径累加（注释误导）;须与 M-PEER-01 分名",E0;E1;E3
+M-PEER-03,P1,ecosystem,transport 与地址族分布,ratio,task,各 transport 或族 live peer 数,live peer 总数,每个采样窗口,采样,point-in-time;不重置,rqbit:PeerStats.conn_kind + 地址族分类,partial,中,"dual-stack 判定;TUN 会掩盖真实族",E1;E2
+M-PEER-04,P1,ecosystem,seeder 与 leecher 分布,ratio,task,各角色 peer 数,live peer 总数,每个采样窗口,采样,point-in-time,FD/rqbit 需角色计数（现无独立字段）,missing,低,"peer 自报 completion 不可信;tracker 报的 seeders 不等于可连 seeders",E1;E3
+M-PEER-05,P1,ecosystem,自报客户端分层,ratio,task,各客户端名 peer 数,live peer 总数,每个采样窗口,采样,point-in-time;客户端名可伪造,rqbit:PeerStats.remote_client_name,available,低,"不得当恶意判据",E1;E3
+M-PEER-06,P1,ecosystem,吞吐集中度（top-1 / top-3 占比或 HHI）,ratio,task,最高 peer 的 fetched 字节,总 fetched 字节,整个 run,派生,不重置;单个高速 seed 必须单列,per-peer snapshot,partial,中,"集中度高可能只是单一 seed 强",E1;E3
+M-PEER-07,P1,ecosystem,候选存活率,ratio,run,窗口内仍可连的候选数,该窗口候选总数,每个采样窗口,采样,不重置;churn 与不可达要分开,FD/rqbit 候选来源与最终状态,missing,中,"一次 bootstrap 失败不代表 DHT 整体失效",E1;E2;E3
+M-REQ-01,P1,request,请求窗口占用,count,peer,在途请求块数,1,1s,采样,point-in-time;与硬上限分开,rqbit 请求流水线（需定位实现）,partial,中,"libtorrent 对照：max_out_request_queue 是硬上限、desired_queue_size 是运行时额度",E0;E1
+M-REQ-02,P1,request,请求完成时延（块级）,ms,peer,请求发出到块到达,1,每个请求,事件驱动 + 分位聚合,分位在固定窗口计算;与连接超时区分,rqbit 需新增块级时间戳,missing,中,"高方差需 p50/p95 同报",E0;E1;E2
+M-REQ-03,P1,request,取消/超时/重复字节,count; B,run,各类计数与字节,1,整个 run,累计计数器差分,不重置;超时与取消分开,rqbit 需新增请求级计数器,missing,中,"重复字节与 endgame 重叠相关",E0;E1;E2
+M-REQ-04,P1,request,hash 失败与恢复,count; B,run,校验失败 piece 数与字节,1,整个 run,累计计数器差分,不重置;不得未经存储路径排查就归罪对端,FD 校验失败事件 + rqbit 错误分类,partial,中,"内存/磁盘错误与对端坏数据难区分",E0;E1
+M-REQ-05,P1,request,piece 可用度（可得副本）,ratio,task,已确认有该 piece 的 live peer 数,1,每个采样窗口,采样,point-in-time;需 peer have 位图或等价信息,rqbit have 位图聚合,partial,高（大 swarm 位图聚合）,私有 torrent 的发现限制会改变可用度,E1;E3
+M-REQ-06,P1,request,endgame 重叠与长尾请求,count,run,重复请求的块数,1,整个 run,累计计数器差分,不重置;与 M-REQ-03 重复字节交叉核对,rqbit piece tracker / 请求取消路径,missing,中,"endgame 的收益与开销需同时报",E0;E1
+M-RATIO-01,P1,transfer,useful/wire 效率,ratio,run,V(t_done)-V(t_accept),wire payload 字节,整个 run,派生,不重置;useful 按唯一有效文件字节;失败重下不得重复计入 useful,FD 已验证字节 + wire payload 计数器,partial,低,"wire payload 口径（是否含 BT 协议头）必须声明",E0;E1;E2
+M-RATIO-02,P1,transfer,上传与下载 payload（分报）,B,task,上传 payload 字节,1,整个 run,累计计数器差分,跨 epoch 需守恒核对;不使用快照差值加回,FD:uploaded_bytes 与 tasks 表字段,available,低,"注意「复制链接」类 UI 使用 origin_url;上传统计与做种时间持久化边界",E0;E1;E3
+M-RATIO-03,P1,transfer,协议开销比,ratio,run,非 payload 字节,payload 字节,整个 run,派生,不重置;含握手/扩展消息/重传,FD/rqbit wire 与 payload 计数,partial,低,"需区分 BT 协议开销与 IP/UDP 头",E1;E2
+M-RATIO-04,P1,transfer,重传字节,B,host,重传字节,1,每条件 ≥60s,内核计数器采样,不重置;与 M-GUARD-02 同源,OS:TCP_INFO;OS:/proc/net/snmp,partial,低,TUN/代理掩盖重传,E1;E2
+M-RATIO-05,P1,fairness,多任务需求归一化 goodput,ratio,run,任务 goodput / 任务需求,1,整个 run,派生,不重置;仅在任务目标与容量可比或已归一化时比较,FD 每任务进度 + 需求（选项字节）,partial,低,"任务大小与剩余量不同导致不可比",E1;E3
+M-RATIO-06,P1,fairness,公平性与饥饿时长,ratio; s,run,Jain 指数（归一化后）;最长饥饿时长,1,整个 run,派生,不重置;Jain 只在可比或归一化时使用,FD 每任务进度序列,partial,低,"不以牺牲全部做种/交互流换速度",E1;E3
+M-RATIO-07,P1,fairness,TCP 与 uTP 共存表现,ratio,run,uTP goodput 份额,总 goodput,整个 run,派生,不重置;同一 peer 竞速需分别归因,FD/rqbit conn_kind + 字节,partial,中,"LEDBAT 是 Experimental;目标函数与实现分开验证",E1;E2
+M-RECOVER-01,P0,recovery,暂停请求到生效时延 / resume 到首个新有效数据时延,s,run,各时延,1,每次操作,事件驱动,不重置;两段分别报,FD 暂停/resume 指令时间戳 + V(t),partial,低,"暂停期间残留流量须单列",E0;E1
+M-RECOVER-02,P0,recovery,重校与重下字节及时间,B; s,run,重下或重校字节,1,每次恢复,事件驱动,不重置;与正常传输分开报,FD 校验事件 + 任务字节字段,partial,中,"UI 进度重置不等于丢数据",E0;E1;E2
+M-RECOVER-03,P0,recovery,选定文件 hash 与完成持久化核验,enum,task,每个选定文件的校验结果,1,每次完成,事件驱动,不重置;未核验不得称断电安全完成,FD 完成校验 + 外部哈希比对,partial,中（全量读盘）,"跨文件 piece 边界;sparse 文件空洞",E0;E1;E2
+M-RECOVER-04,P0,recovery,累计上传跨 epoch 守恒,B,task,重启后累计上传,重启前累计上传,跨重启窗口,事件驱动,必须守恒;不得用快照差值加回,FD tasks 表上传字段 + rqbit 会话持久化,partial,低,"rqbit 上游 TODO 记录总上传字节尚未持久化",E0;E1
+M-RECOVER-05,P0,recovery,epoch 对齐的已验证区间,B,task,V(t)（按连接代际）,1,每次 epoch 变化,事件驱动,已验证区间必须与连接代际对齐;不对 V(t) 双重计入,FD 已验证字节 + epoch 标记,partial,低,"epoch 边界处理错误会产生虚假提升",E0;E1
+M-NASMOB-01,P1,platform,NAS 空闲唤醒与周期 I/O,count; ms,host,空闲期磁盘 I/O 次数与队列延迟,1,长周期（≥10min 空闲）,平台采样,不重置;空闲判定门控,OS:/proc/diskstats 与 /sys/block/*/queue;FD 空闲判定,partial,低,"机械盘转速恢复会放大单次写代价",E1;E3
+M-NASMOB-02,P1,platform,移动端后台任务成功率,ratio,run,后台完成的 run 数,后台启动的 run 数,整个 run,平台 API 事件,右删失单列;与前台分开报,platform:Android JobScheduler / iOS BGTaskScheduler,missing,中,"平台限流与厂商省电策略差异",E2;E3
+M-NASMOB-03,P1,platform,移动端恢复时延（切回前台/网络切换）,s,run,切回前台到首个新有效数据,1,每次切换,事件驱动,不重置;与桌面结果不可互推,platform:应用生命周期事件 + V(t),missing,低,"重连退避与离线宽限（800ms）影响",E2;E3
+M-NASMOB-04,P1,platform,移动端温度与能耗,C; J; B,run,温度与能量增量;传输字节,1,整个 run,平台采样,不重置;需与传输字节同时报,platform:Android BatteryManager / iOS MetricKit,missing,高,"蜂窝射频能耗远高于 Wi-Fi",E2;E3
+M-NASMOB-05,P1,platform,蜂窝流量代价,B,run,蜂窝接口收发字节,1,整个 run,平台采样,不重置;需区分计费流量与不计费,platform:Android TrafficStats / iOS NWPathMonitor + 接口计数,missing,中,"Wi-Fi 与蜂窝切换点难精确切齐",E2;E3
