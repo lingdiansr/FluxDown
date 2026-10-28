@@ -1120,6 +1120,7 @@ Clash TUN 或透明代理开启
 |1|`speed_limit_bytes`|`SessionOptions.ratelimits.download_bps`；`0` = 不限|会直接给整个 BT session 限速；HTTP 的分段数不影响 BT 下载|先确认实际 config 值；任何非零值都比调 peer 更优先排除|
 |1|`upload_limit_bytes` + task/queue upload limit|全局上传 limiter 与 torrent 上传 limiter 叠加|上传过低可能减少对端愿意提供的服务；过高会挤占 100M 上行、ACK/NAT/路由器资源|保持用户上限；不要用自动策略突破|
 |2|`bt_peer_limit`|每 torrent semaphore + session 缺省，当前 256；范围 128..512|只限制同时占用连接资源的 peer，不保证存在更多可用 peer；#825 实测 128→512 在公网 swarm 里提升显著（1.1→12.6 MB/s）|先看 `live/queued` 证据再决定提高；提高后留意 CPU/FD/RSS|
+|2|`bt_peer_connect_limit`|每 torrent **半开拨号**预算；范围 32..256，默认 **128**（2026-10-17 由 64 上调）；会话级派生的总连接预算 `(bt_session_peer_limit / 4).clamp(1, 128)`|决定候选池探测速率，是本次实测的主导项：同一 torrent、同机、各冷会话、各 300 s 窗口的 A/B —— 64 时 `connecting` 全程顶格 64、均值 2.36 MB/s；256 时 `connecting` 峰值 112（撞 128 会话上限）、均值 **11.83 MB/s（≈5.0×）**，并超过本文件 §10.6 记录的 8.20 MiB/s 基线|默认 64 会把探测速率饿死（候选池 1300–1500、可达率约 1.5% 时挖不出 peer）；128 已是不抬 `bt_session_peer_limit` 时的最大有效值（128 与 256 等效）。证据见 2026-10-17 的 `~/.local/share/fluxdown/logs/fluxdown_2026-10-17.log`（两臂 `task=b150b68b` / `task=41f316de`）|
 |2|DHT / tracker 发现|DHT 开启；显式 4 个 bootstrap；内置、用户、订阅 tracker 合并|决定候选 peer 数和首个有效 peer 时间；发现失败时提高 peer 上限没有收益|当前比 peer limit 更值得补观测|
 |3|`connect_rate=30`|每秒最多 30 个出站连接尝试|影响冷启动和坏 peer 替换速度，不直接限制已稳定传输吞吐|固定；缺少连接失败率/握手延迟前不调|
 |3|connect/handshake/read-write timeout|10s/10s/20s|坏 peer 占用连接槽的时长与慢 peer 保留时间之间的折中|固定；过短可能误杀高延迟 peer|

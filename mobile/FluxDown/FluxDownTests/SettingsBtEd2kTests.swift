@@ -89,7 +89,7 @@ struct SettingsBtEd2kTests {
 
     @Test func peerBudgetRowsMatchTheDaemonRangesAndDefaults() {
         #expect(SettingsCatalog.field("bt_peer_connect_limit")?.kind == .integer(min: 32, max: 256))
-        #expect(SettingsCatalog.field("bt_peer_connect_limit")?.defaultWire == "64")
+        #expect(SettingsCatalog.field("bt_peer_connect_limit")?.defaultWire == "128")
         #expect(SettingsCatalog.field("bt_session_peer_limit")?.kind == .integer(min: 128, max: 4_096))
         #expect(SettingsCatalog.field("bt_session_peer_limit")?.defaultWire == "1024")
         // 每次会话构造时生效的纯本机资源参数：不参与云同步。

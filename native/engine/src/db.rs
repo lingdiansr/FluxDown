@@ -3212,8 +3212,10 @@ impl Db {
             // Live (established) peers only: half-open dials are budgeted by
             // `bt_peer_connect_limit` below.
             ("bt_peer_limit", "256"),
-            // Outbound connecting peers per torrent; 32..256, default 64.
-            ("bt_peer_connect_limit", "64"),
+            // Outbound connecting peers per torrent; 32..256, default 128.
+            // 会话级连接预算 `(bt_session_peer_limit / 4).clamp(1, 128)` 封顶 128，
+            // 所以 128 是「不用同时抬会话预算」时的最大有效值。
+            ("bt_peer_connect_limit", "128"),
             // Session-wide logical peer budget; 128..4096, default 1024.
             ("bt_session_peer_limit", "1024"),
             // MSE 三态逃生开关（disabled/enabled/forced），无 UI，经 config API/CLI 可设。

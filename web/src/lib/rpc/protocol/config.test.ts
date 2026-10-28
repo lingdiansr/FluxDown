@@ -90,7 +90,7 @@ describe('daemon 配置目录镜像', () => {
       // 实时（已建立）任务 Peer 上限；半开拨号另由 bt_peer_connect_limit 计费。
       { key: 'bt_peer_limit', kind: 'integer', default: '256', min: 128, max: 512 },
       // 单任务半开连接上限。
-      { key: 'bt_peer_connect_limit', kind: 'integer', default: '64', min: 32, max: 256 },
+      { key: 'bt_peer_connect_limit', kind: 'integer', default: '128', min: 32, max: 256 },
       // 会话 Peer 连接预算（含连接尝试与磁力 metadata）。
       { key: 'bt_session_peer_limit', kind: 'integer', default: '1024', min: 128, max: 4_096 },
     ] as const

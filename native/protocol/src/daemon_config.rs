@@ -163,7 +163,7 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     field(
         "bt_peer_connect_limit",
         DaemonConfigKind::Integer { min: 32, max: 256 },
-        "64",
+        "128",
     ),
     field(
         "bt_session_peer_limit",
